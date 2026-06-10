@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  body {
+    @apply bg-ink-950 text-fg font-sans text-sm;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-ink-600;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    @apply text-fg-muted;
+  }
+}
+
+@layer components {
+  .input-dark {
+    @apply w-full rounded-lg border border-ink-700 bg-ink-800 px-3 py-2 text-sm text-fg outline-none transition-colors focus:border-brand;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-ink-700 bg-ink-800 px-4 py-2 text-sm font-medium text-fg transition-colors hover:bg-ink-750 disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium text-fg-secondary transition-colors hover:bg-ink-750 hover:text-fg;
+  }
+  .menu-panel {
+    @apply rounded-xl border border-ink-700 bg-ink-850 p-1.5 shadow-popover;
+  }
+  .menu-item {
+    @apply flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-fg-secondary transition-colors hover:bg-ink-750 hover:text-fg;
+  }
+}
