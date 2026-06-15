@@ -78,7 +78,11 @@ Resolution rules implemented in `PermissionService`:
 - **Workspace admin** has admin rights over projects inside that workspace only.
 - **Project members** see only projects they belong to; `viewer` can read but not write.
 - Workspace **delete/archive** requires the *org owner* (workspace admins cannot).
-- Sprint start/complete requires scrum master *or* workspace admin *or* org owner.
+- **Scrum master** is a *per-sprint facilitation role*, not a permission tier: any member of the
+  sprint's workspace is eligible (enforced — assigning a non-member returns 422). It is assigned by
+  whoever can edit the sprint (workspace admin, org owner, or the current scrum master when handing
+  off). The scrum master can edit, start and complete *that sprint only*; they gain no other admin
+  rights. Sprint create/delete remain workspace-admin/org-owner only.
 - **Superadmin is platform-scope only**: admin endpoints return org *metadata and aggregate counts*; all org-content endpoints treat a superadmin without membership as a stranger (404). This is enforced and tested.
 
 ## Realtime design

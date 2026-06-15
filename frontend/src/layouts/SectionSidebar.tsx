@@ -17,7 +17,14 @@ import { NavLink, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { useQuery } from '@tanstack/react-query'
 
-import { GitHubIcon, GoogleCalendarIcon, GoogleDriveIcon, OutlookIcon } from '../components/icons/brands'
+import {
+  GitHubIcon,
+  GmailIcon,
+  GoogleCalendarIcon,
+  GoogleDocsIcon,
+  GoogleSheetsIcon,
+  OutlookIcon,
+} from '../components/icons/brands'
 import { api } from '../lib/api'
 import { useCurrentContext, useForms, useTeams, useWhiteboards, useWorkspaceMembers } from '../lib/queries'
 import type { CalendarEvent } from '../lib/types'
@@ -340,7 +347,10 @@ function AppsSidebar() {
         icon={<GitHubIcon size={15} className="text-fg" />}
         label="GitHub"
       />
-      <Item to="/app/apps?app=gdrive" icon={<GoogleDriveIcon size={15} />} label="Google Drive" />
+      <Item to="/app/apps?q=calendar" icon={<GoogleCalendarIcon size={15} />} label="Google Calendar" />
+      <Item to="/app/apps?q=gmail" icon={<GmailIcon size={15} />} label="Gmail" />
+      <Item to="/app/apps?q=sheets" icon={<GoogleSheetsIcon size={15} />} label="Google Sheets" />
+      <Item to="/app/apps?q=docs" icon={<GoogleDocsIcon size={15} />} label="Google Docs" />
     </Shell>
   )
 }

@@ -321,14 +321,16 @@ function CreateMenu({
               description="Track tasks, lists & sprints"
             />
           )}
-          <CreateItem
-            close={close}
-            onPick={onPick}
-            kind="channel"
-            icon={<Hash size={15} className="text-emerald-400" />}
-            label="Channel"
-            description="Conversations on specific topics"
-          />
+          {canManage && (
+            <CreateItem
+              close={close}
+              onPick={onPick}
+              kind="channel"
+              icon={<Hash size={15} className="text-emerald-400" />}
+              label="Channel"
+              description="Conversations on specific topics"
+            />
+          )}
           {canManage && (
             <CreateItem
               close={close}
@@ -433,6 +435,7 @@ function CreateModal({
   const [projName, setProjName] = useState('')
   const [projKey, setProjKey] = useState('')
   const [projSpaceId, setProjSpaceId] = useState('')
+  const [newSpaceName, setNewSpaceName] = useState('')
   const [taskTitle, setTaskTitle] = useState('')
   const [taskProjectId, setTaskProjectId] = useState('')
 
@@ -453,10 +456,19 @@ function CreateModal({
   }
 
   const createProject = async () => {
-    const spaceId = projSpaceId || spaces.data?.[0]?.id
-    if (!spaceId || !projName.trim() || projKey.trim().length < 2) return
+    if (!projName.trim() || projKey.trim().length < 2) return
+    let spaceId = projSpaceId || spaces.data?.[0]?.id
+    if (!spaceId && (!workspaceId || !newSpaceName.trim())) return
     setBusy(true)
     try {
+      if (!spaceId) {
+        const space = await api.post<{ id: string }>(`/workspaces/${workspaceId}/spaces`, {
+          name: newSpaceName.trim(),
+        })
+        spaceId = space.id
+        setNewSpaceName('')
+        onCreatedSpace()
+      }
       const project = await api.post<{ id: string }>(`/spaces/${spaceId}/projects`, {
         name: projName.trim(),
         key: projKey.trim().toUpperCase(),
@@ -496,17 +508,21 @@ function CreateModal({
       {/* Task */}
       <Modal open={kind === 'task'} onClose={onClose} title="Create task" width="max-w-md">
         <div className="space-y-3">
-          <select className="input-dark" value={taskProjectId} onChange={(e) => setTaskProjectId(e.target.value)}>
-            {(projects.data ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
           {(projects.data ?? []).length === 0 ? (
             <p className="text-xs text-fg-muted">You don't have access to any projects yet.</p>
           ) : (
             <>
+              <select
+                className="input-dark"
+                value={taskProjectId || projects.data?.[0]?.id || ''}
+                onChange={(e) => setTaskProjectId(e.target.value)}
+              >
+                {(projects.data ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
               <input
                 className="input-dark"
                 placeholder="Task name"
@@ -543,17 +559,36 @@ function CreateModal({
       {/* Project */}
       <Modal open={kind === 'project'} onClose={onClose} title="Create Project" width="max-w-md">
         <div className="space-y-3">
-          <select
-            className="input-dark"
-            value={projSpaceId || spaces.data?.[0]?.id || ''}
-            onChange={(e) => setProjSpaceId(e.target.value)}
-          >
-            {(spaces.data ?? []).map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-fg-secondary">Space</label>
+            {spaces.isPending ? (
+              <p className="text-xs text-fg-muted">Loading spaces…</p>
+            ) : (spaces.data ?? []).length === 0 ? (
+              <input
+                className="input-dark"
+                placeholder="New space name (e.g. Engineering)"
+                value={newSpaceName}
+                onChange={(e) => setNewSpaceName(e.target.value)}
+              />
+            ) : (
+              <select
+                className="input-dark"
+                value={projSpaceId || spaces.data?.[0]?.id || ''}
+                onChange={(e) => setProjSpaceId(e.target.value)}
+              >
+                {(spaces.data ?? []).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {!spaces.isPending && (spaces.data ?? []).length === 0 && (
+              <p className="mt-1 text-[11px] text-fg-muted">
+                No spaces yet — one will be created along with your project.
+              </p>
+            )}
+          </div>
           <input
             className="input-dark"
             placeholder="Project name"
@@ -573,7 +608,13 @@ function CreateModal({
           />
           <button
             className="btn-primary w-full"
-            disabled={busy || !projName.trim() || projKey.trim().length < 2}
+            disabled={
+              busy ||
+              !projName.trim() ||
+              projKey.trim().length < 2 ||
+              spaces.isPending ||
+              ((spaces.data ?? []).length === 0 && !newSpaceName.trim())
+            }
             onClick={createProject}
           >
             Create Project

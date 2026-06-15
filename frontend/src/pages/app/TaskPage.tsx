@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
   Calendar,
+  CalendarPlus,
   Download,
   GitBranch,
   Link2,
@@ -18,14 +19,15 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
-import { useRunningTimer } from '../../lib/queries'
+import { useProject, useRunningTimer, useSprints } from '../../lib/queries'
 import { recordRecent } from '../../lib/recents'
-import type { Page, Task, TaskDetail, TimeEntry } from '../../lib/types'
-import { cn, formatBytes, formatDate, formatDuration, isOverdue } from '../../lib/utils'
+import type { Page, Sprint, Task, TaskDetail, TimeEntry } from '../../lib/types'
+import { cn, formatBytes, formatDate, formatDuration, isOverdue, timeAgo } from '../../lib/utils'
 import { useRealtime } from '../../lib/ws'
 import { toast } from '../../stores/toast'
 import { CommentSection } from '../../components/comments/CommentSection'
 import { AssigneePicker, DatePicker, PriorityPicker, StatusPicker } from '../../components/tasks/pickers'
+import { Dropdown } from '../../components/ui/Dropdown'
 import { AvatarStack } from '../../components/ui/Avatar'
 import { LabelChip, PriorityFlag, StatusPill, TaskTypeBadge } from '../../components/ui/badges'
 import { CenteredSpinner } from '../../components/ui/Spinner'
@@ -108,6 +110,8 @@ export default function TaskPage() {
           <Dependencies task={task} />
           <Attachments task={task} />
           <TimeTracking task={task} />
+          <TaskGithub task={task} onTaskUpdate={() => void queryClient.invalidateQueries({ queryKey: ['task', taskId] })} />
+          <TaskEmails task={task} />
 
           <div className="mt-8 border-t border-ink-700 pt-6">
             <CommentSection taskId={task.id} projectId={task.project_id} />
@@ -153,26 +157,33 @@ export default function TaskPage() {
           </MetaRow>
 
           <MetaRow label="Due date">
-            <DatePicker
-              value={task.due_date}
-              onChange={(d) => update.mutate(d ? { due_date: d } : { clear_due_date: true })}
-            >
-              <span
-                className={cn(
-                  'flex cursor-pointer items-center gap-1.5 text-sm',
-                  isOverdue(task.due_date, task.completed_at)
-                    ? 'font-medium text-red-400'
-                    : 'text-fg-secondary',
-                )}
+            <div className="flex items-center gap-2">
+              <DatePicker
+                value={task.due_date}
+                onChange={(d) => update.mutate(d ? { due_date: d } : { clear_due_date: true })}
               >
-                <Calendar size={14} />
-                {task.due_date ? formatDate(task.due_date) : 'Set due date'}
-              </span>
-            </DatePicker>
+                <span
+                  className={cn(
+                    'flex cursor-pointer items-center gap-1.5 text-sm',
+                    isOverdue(task.due_date, task.completed_at)
+                      ? 'font-medium text-red-400'
+                      : 'text-fg-secondary',
+                  )}
+                >
+                  <Calendar size={14} />
+                  {task.due_date ? formatDate(task.due_date) : 'Set due date'}
+                </span>
+              </DatePicker>
+              {task.due_date && <AddToCalendarButton taskId={task.id} />}
+            </div>
           </MetaRow>
 
           <MetaRow label="Story points">
             <PointsEditor value={task.story_points} onSave={(p) => update.mutate({ story_points: p })} />
+          </MetaRow>
+
+          <MetaRow label="Sprint">
+            <SprintRow task={task} />
           </MetaRow>
 
           <MetaRow label="Labels">
@@ -190,6 +201,319 @@ export default function TaskPage() {
           </MetaRow>
         </aside>
       </div>
+    </div>
+  )
+}
+
+/** Push the task's due date onto the user's Google Calendar as an all-day event. */
+function AddToCalendarButton({ taskId }: { taskId: string }) {
+  const [busy, setBusy] = useState(false)
+  const add = async () => {
+    setBusy(true)
+    try {
+      const { link } = await api.post<{ link: string }>(`/tasks/${taskId}/calendar-event`)
+      toast.success('Added to your Google Calendar')
+      if (link) window.open(link, '_blank', 'noreferrer')
+    } catch (err) {
+      toast.error(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <button
+      className="text-fg-muted transition-colors hover:text-brand"
+      title="Add to Google Calendar"
+      disabled={busy}
+      onClick={() => void add()}
+    >
+      <CalendarPlus size={14} />
+    </button>
+  )
+}
+
+interface RepoOut {
+  id: string
+  repo_full_name: string
+  default_branch: string
+  is_active: boolean
+}
+
+interface TaskGithubEvent {
+  id: string
+  event_type: string
+  action: string | null
+  actor_login: string | null
+  payload: Record<string, unknown>
+  created_at: string
+}
+
+function branchNameFor(task: TaskDetail): string {
+  const slug = task.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+  return `${task.ref.toLowerCase()}${slug ? `-${slug}` : ''}`
+}
+
+/** ClickUp-style development panel: linked GitHub activity + branch/issue/PR actions. */
+function TaskGithub({ task, onTaskUpdate }: { task: TaskDetail; onTaskUpdate: () => void }) {
+  const queryClient = useQueryClient()
+  const repos = useQuery({
+    queryKey: ['project-repos', task.project_id],
+    queryFn: () => api.get<RepoOut[]>(`/github/projects/${task.project_id}/repositories`),
+  })
+  const events = useQuery({
+    queryKey: ['task-github-events', task.id],
+    queryFn: () => api.get<TaskGithubEvent[]>(`/github/tasks/${task.id}/events`),
+  })
+
+  const createIssue = useMutation({
+    mutationFn: () => api.post<{ issue_number: number; issue_url: string }>(`/github/tasks/${task.id}/create-issue`),
+    onSuccess: () => {
+      onTaskUpdate()
+      void queryClient.invalidateQueries({ queryKey: ['task', task.id] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const repo = (repos.data ?? []).find((r) => r.is_active)
+  const hasEvents = (events.data ?? []).length > 0
+  if (!repo && !hasEvents) return null
+
+  const branch = branchNameFor(task)
+  const copyBranch = async () => {
+    await navigator.clipboard.writeText(branch)
+    toast.success(`Branch name copied: ${branch}`)
+  }
+
+  return (
+    <div className="mt-8">
+      <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold text-fg">
+        <GitBranch size={14} className="text-fg-secondary" /> Development
+      </h3>
+
+      {repo && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <button className="btn-secondary !py-1 text-xs" onClick={() => void copyBranch()} title={branch}>
+            Copy branch name
+          </button>
+
+          {task.github_issue_number ? (
+            <a
+              className="btn-secondary !py-1 text-xs flex items-center gap-1"
+              href={task.github_issue_url ?? `https://github.com/${repo.repo_full_name}/issues/${task.github_issue_number}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Issue #{task.github_issue_number}
+            </a>
+          ) : (
+            <button
+              className="btn-secondary !py-1 text-xs"
+              disabled={createIssue.isPending}
+              onClick={() => createIssue.mutate()}
+            >
+              {createIssue.isPending ? 'Creating…' : 'Create GitHub Issue'}
+            </button>
+          )}
+
+          <a
+            className="btn-secondary !py-1 text-xs"
+            href={`https://github.com/${repo.repo_full_name}/compare`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            New pull request
+          </a>
+        </div>
+      )}
+
+      {hasEvents ? (
+        <div className="overflow-hidden rounded-xl border border-ink-700">
+          {(events.data ?? []).map((event) => (
+            <a
+              key={event.id}
+              href={(event.payload.url as string) || undefined}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-3 border-b border-ink-700/60 bg-ink-900 px-4 py-2 last:border-b-0 hover:bg-ink-850"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm text-fg">
+                {(event.payload.summary as string) || `${event.event_type} ${event.action ?? ''}`}
+              </span>
+              <span className="shrink-0 text-[11px] text-fg-muted">
+                {event.actor_login} · {timeAgo(event.created_at)}
+              </span>
+            </a>
+          ))}
+        </div>
+      ) : (
+        repo && (
+          <p className="text-xs text-fg-muted">
+            No GitHub activity yet — mention {task.ref} in a commit, PR or issue on {repo.repo_full_name}.
+          </p>
+        )
+      )}
+    </div>
+  )
+}
+
+interface TaskEmailsOut {
+  connected: boolean
+  emails: { id: string; subject: string; sender: string; date: string; snippet: string; link: string }[]
+}
+
+/** The caller's own Gmail messages mentioning this task's ref (read-only). */
+function TaskEmails({ task }: { task: TaskDetail }) {
+  const navigate = useNavigate()
+  const { data } = useQuery({
+    queryKey: ['task-emails', task.id],
+    queryFn: () => api.get<TaskEmailsOut>(`/tasks/${task.id}/emails`),
+    staleTime: 60_000,
+  })
+
+  if (!data) return null
+
+  return (
+    <div className="mt-8">
+      <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold text-fg">
+        Emails
+        {data.connected && <span className="text-xs font-normal text-fg-muted">mentioning {task.ref} in your Gmail</span>}
+      </h3>
+      {!data.connected ? (
+        <p className="text-xs text-fg-muted">
+          <button className="text-brand hover:underline" onClick={() => navigate('/app/apps')}>
+            Connect your Google account
+          </button>{' '}
+          to see emails that mention this task.
+        </p>
+      ) : data.emails.length === 0 ? (
+        <p className="text-xs text-fg-muted">No emails mention {task.ref}.</p>
+      ) : (
+        <div className="overflow-hidden rounded-xl border border-ink-700">
+          {data.emails.map((mail) => (
+            <a
+              key={mail.id}
+              href={mail.link}
+              target="_blank"
+              rel="noreferrer"
+              className="block border-b border-ink-700/60 bg-ink-900 px-4 py-2.5 last:border-b-0 hover:bg-ink-850"
+            >
+              <div className="flex items-baseline gap-2">
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{mail.subject}</span>
+                <span className="shrink-0 text-[11px] text-fg-muted">{mail.date.slice(0, 22)}</span>
+              </div>
+              <p className="mt-0.5 truncate text-xs text-fg-secondary">
+                {mail.sender} — {mail.snippet}
+              </p>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const SPRINT_STATUS_STYLES: Record<Sprint['status'], string> = {
+  planned: 'bg-ink-750 text-fg-secondary',
+  active: 'bg-emerald-500/15 text-emerald-400',
+  completed: 'bg-brand-soft text-brand',
+}
+
+/** Show the sprints this task is in; add to / remove from open sprints (ClickUp-style). */
+function SprintRow({ task }: { task: TaskDetail }) {
+  const queryClient = useQueryClient()
+  const project = useProject(task.project_id)
+  const taskSprints = useQuery({
+    queryKey: ['task-sprints', task.id],
+    queryFn: () => api.get<Sprint[]>(`/tasks/${task.id}/sprints`),
+  })
+  const allSprints = useSprints(project.data?.workspace_id)
+
+  const inIds = new Set((taskSprints.data ?? []).map((s) => s.id))
+  const addable = (allSprints.data ?? []).filter(
+    (s) => s.status !== 'completed' && !inIds.has(s.id) && (!s.project_id || s.project_id === task.project_id),
+  )
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['task-sprints', task.id] })
+    void queryClient.invalidateQueries({ queryKey: ['sprints'] })
+    void queryClient.invalidateQueries({ queryKey: ['sprint-tasks'] })
+  }
+
+  const add = async (sprintId: string) => {
+    try {
+      await api.post(`/sprints/${sprintId}/tasks`, { task_ids: [task.id] })
+      refresh()
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  const remove = async (sprintId: string) => {
+    try {
+      await api.delete(`/sprints/${sprintId}/tasks/${task.id}`)
+      refresh()
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {(taskSprints.data ?? []).map((sprint) => (
+        <span
+          key={sprint.id}
+          className={cn(
+            'group flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium',
+            SPRINT_STATUS_STYLES[sprint.status],
+          )}
+        >
+          {sprint.name}
+          {sprint.status !== 'completed' && (
+            <button
+              className="hidden text-current opacity-70 hover:opacity-100 group-hover:inline"
+              onClick={() => void remove(sprint.id)}
+              title="Remove from sprint"
+            >
+              <X size={11} />
+            </button>
+          )}
+        </span>
+      ))}
+      {addable.length > 0 && (
+        <Dropdown
+          width="w-52"
+          trigger={
+            <button className="text-sm text-fg-muted hover:text-fg-secondary">
+              {(taskSprints.data ?? []).length === 0 ? '+ Add to sprint' : '+'}
+            </button>
+          }
+        >
+          {(close) =>
+            addable.map((sprint) => (
+              <button
+                key={sprint.id}
+                className="menu-item"
+                onClick={() => {
+                  void add(sprint.id)
+                  close()
+                }}
+              >
+                <span className="flex-1 truncate">{sprint.name}</span>
+                <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase', SPRINT_STATUS_STYLES[sprint.status])}>
+                  {sprint.status}
+                </span>
+              </button>
+            ))
+          }
+        </Dropdown>
+      )}
+      {(taskSprints.data ?? []).length === 0 && addable.length === 0 && (
+        <span className="text-sm text-fg-muted">—</span>
+      )}
     </div>
   )
 }

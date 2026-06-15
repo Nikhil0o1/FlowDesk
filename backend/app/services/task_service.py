@@ -137,16 +137,20 @@ def assign_users(
             )
     if added:
         db.flush()
-        emit(
-            "task.assigned",
-            task_rooms(project),
-            payload={"task_id": str(task.id), "user_ids": [str(u) for u in added],
-                     "assigned_by": str(actor.id)},
-            project_id=project.id,
-            workspace_id=project.workspace_id,
-            task_id=task.id,
-        )
     return added
+
+
+def emit_assigned(project: Project, task: Task, added: list[uuid.UUID], actor: User) -> None:
+    """Broadcast task.assigned — call only after the transaction has committed."""
+    emit(
+        "task.assigned",
+        task_rooms(project),
+        payload={"task_id": str(task.id), "user_ids": [str(u) for u in added],
+                 "assigned_by": str(actor.id)},
+        project_id=project.id,
+        workspace_id=project.workspace_id,
+        task_id=task.id,
+    )
 
 
 def apply_status_change(db: Session, task: Task, new_status_id: uuid.UUID | None) -> bool:

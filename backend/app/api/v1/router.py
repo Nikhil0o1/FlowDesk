@@ -9,6 +9,7 @@ from app.api.v1 import (
     comments,
     forms,
     github,
+    integrations,
     notifications,
     organizations,
     projects,
@@ -40,6 +41,7 @@ api_router.include_router(teams.router)
 api_router.include_router(whiteboards.router)
 api_router.include_router(forms.router)
 api_router.include_router(calendar.router)
+api_router.include_router(integrations.router)
 api_router.include_router(attachments.router)
 api_router.include_router(search.router)
 api_router.include_router(admin.router)

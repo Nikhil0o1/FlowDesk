@@ -1,6 +1,9 @@
 import uuid
 
+from sqlalchemy import select
+
 from app.models.organization import OrganizationMember
+from app.models.notification import Notification
 from app.models.project import Project, ProjectMember, Space
 from app.models.task import Task
 from app.models.workspace import Workspace, WorkspaceMember
@@ -104,6 +107,172 @@ def test_workspace_member_cannot_delete_workspace(client, db, org, owner):
     # org owner can
     owner_headers = auth_headers(client, "owner@test.dev")
     assert client.delete(f"/api/v1/workspaces/{workspace.id}", headers=owner_headers).status_code == 200
+
+
+def test_workspace_owner_can_promote_and_demote_admins_and_members(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    admin = make_user(db, "admin-target@test.dev")
+    member = make_user(db, "member-target@test.dev")
+    db.add(OrganizationMember(organization_id=org.id, user_id=admin.id, role="member"))
+    db.add(OrganizationMember(organization_id=org.id, user_id=member.id, role="member"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=admin.id, role="admin"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=member.id, role="member"))
+    db.flush()
+    headers = auth_headers(client, "owner@test.dev")
+
+    demoted = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{admin.id}",
+        headers=headers,
+        json={"role": "member"},
+    )
+    assert demoted.status_code == 200, demoted.text
+    promoted = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{member.id}",
+        headers=headers,
+        json={"role": "admin"},
+    )
+    assert promoted.status_code == 200, promoted.text
+
+    assert db.scalar(
+        select(WorkspaceMember.role).where(
+            WorkspaceMember.workspace_id == workspace.id,
+            WorkspaceMember.user_id == admin.id,
+        )
+    ) == "member"
+    assert db.scalar(
+        select(WorkspaceMember.role).where(
+            WorkspaceMember.workspace_id == workspace.id,
+            WorkspaceMember.user_id == member.id,
+        )
+    ) == "admin"
+    assert db.scalar(
+        select(Notification).where(
+            Notification.user_id == member.id,
+            Notification.type == "workspace_role_changed",
+        )
+    )
+
+
+def test_workspace_owner_cannot_change_owner_roles(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    second_owner = make_user(db, "second-owner@test.dev")
+    db.add(OrganizationMember(organization_id=org.id, user_id=second_owner.id, role="owner"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=second_owner.id, role="admin"))
+    db.flush()
+    headers = auth_headers(client, "owner@test.dev")
+
+    response = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{second_owner.id}",
+        headers=headers,
+        json={"role": "member"},
+    )
+    assert response.status_code == 403
+
+
+def test_workspace_admin_can_promote_and_demote_admins_and_members(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    admin = make_user(db, "role-admin@test.dev")
+    other_admin = make_user(db, "other-admin@test.dev")
+    member = make_user(db, "role-member@test.dev")
+    for user in (admin, other_admin, member):
+        db.add(OrganizationMember(organization_id=org.id, user_id=user.id, role="member"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=admin.id, role="admin"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=other_admin.id, role="admin"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=member.id, role="member"))
+    db.flush()
+    headers = auth_headers(client, "role-admin@test.dev")
+
+    promoted = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{member.id}",
+        headers=headers,
+        json={"role": "admin"},
+    )
+    assert promoted.status_code == 200, promoted.text
+
+    demoted = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{other_admin.id}",
+        headers=headers,
+        json={"role": "member"},
+    )
+    assert demoted.status_code == 200, demoted.text
+
+
+def test_workspace_member_cannot_change_roles(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    member = make_user(db, "plain-member@test.dev")
+    target = make_user(db, "target-member@test.dev")
+    for user in (member, target):
+        db.add(OrganizationMember(organization_id=org.id, user_id=user.id, role="member"))
+        db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="member"))
+    db.flush()
+    headers = auth_headers(client, "plain-member@test.dev")
+
+    response = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{target.id}",
+        headers=headers,
+        json={"role": "admin"},
+    )
+    assert response.status_code == 403
+
+
+def test_workspace_owner_can_remove_admins_and_members_but_not_owners(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    admin = make_user(db, "remove-admin@test.dev")
+    member = make_user(db, "remove-member@test.dev")
+    second_owner = make_user(db, "remove-owner@test.dev")
+    db.add(OrganizationMember(organization_id=org.id, user_id=admin.id, role="member"))
+    db.add(OrganizationMember(organization_id=org.id, user_id=member.id, role="member"))
+    db.add(OrganizationMember(organization_id=org.id, user_id=second_owner.id, role="owner"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=admin.id, role="admin"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=member.id, role="member"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=second_owner.id, role="admin"))
+    db.flush()
+    headers = auth_headers(client, "owner@test.dev")
+
+    assert client.delete(f"/api/v1/workspaces/{workspace.id}/members/{admin.id}", headers=headers).status_code == 200
+    assert client.delete(f"/api/v1/workspaces/{workspace.id}/members/{member.id}", headers=headers).status_code == 200
+    blocked_owner = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{second_owner.id}", headers=headers)
+    assert blocked_owner.status_code == 403
+    assert db.scalar(
+        select(Notification).where(
+            Notification.user_id == member.id,
+            Notification.type == "workspace_member_removed",
+        )
+    )
+
+
+def test_workspace_admin_can_remove_members_only(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    admin = make_user(db, "remove-role-admin@test.dev")
+    other_admin = make_user(db, "remove-other-admin@test.dev")
+    member = make_user(db, "remove-role-member@test.dev")
+    for user in (admin, other_admin, member):
+        db.add(OrganizationMember(organization_id=org.id, user_id=user.id, role="member"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=admin.id, role="admin"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=other_admin.id, role="admin"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=member.id, role="member"))
+    db.flush()
+    headers = auth_headers(client, "remove-role-admin@test.dev")
+
+    assert client.delete(f"/api/v1/workspaces/{workspace.id}/members/{member.id}", headers=headers).status_code == 200
+    blocked_admin = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{other_admin.id}", headers=headers)
+    assert blocked_admin.status_code == 403
+    blocked_owner = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{owner.id}", headers=headers)
+    assert blocked_owner.status_code == 403
+
+
+def test_workspace_member_cannot_remove_members(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    member = make_user(db, "remove-plain-member@test.dev")
+    target = make_user(db, "remove-target-member@test.dev")
+    for user in (member, target):
+        db.add(OrganizationMember(organization_id=org.id, user_id=user.id, role="member"))
+        db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="member"))
+    db.flush()
+    headers = auth_headers(client, "remove-plain-member@test.dev")
+
+    response = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{target.id}", headers=headers)
+    assert response.status_code == 403
 
 
 def test_task_crud_with_permissions(client, db, org, owner):

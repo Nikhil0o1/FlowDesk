@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_permissions
+from app.core.websocket import emit
 from app.db.session import get_db
 from app.models.whiteboard import Whiteboard
 from app.schemas.common import Message
@@ -74,6 +75,13 @@ def create_whiteboard(
     log_activity(db, workspace_id=workspace_id, action="whiteboard.created",
                  actor_id=perms.user.id, data={"whiteboard_id": str(board.id), "name": board.name})
     db.commit()
+    emit(
+        "whiteboard.created",
+        [f"workspace:{workspace_id}"],
+        payload={"whiteboard_id": str(board.id), "name": board.name,
+                 "actor_id": str(perms.user.id)},
+        workspace_id=workspace_id,
+    )
     out = WhiteboardOut.model_validate(board)
     out.element_count = 0
     return out
@@ -109,6 +117,12 @@ def update_whiteboard(
             raise HTTPException(status_code=422, detail=f"A whiteboard holds at most {MAX_ELEMENTS} elements")
         board.content = {"elements": elements}
     db.commit()
+    emit(
+        "whiteboard.updated",
+        [f"workspace:{board.workspace_id}"],
+        payload={"whiteboard_id": str(board.id), "actor_id": str(perms.user.id)},
+        workspace_id=board.workspace_id,
+    )
     out = WhiteboardOut.model_validate(board)
     out.element_count = len((board.content or {}).get("elements", []))
     return out
@@ -125,4 +139,10 @@ def delete_whiteboard(
         perms.require_workspace_admin(board.workspace_id)
     board.deleted_at = datetime.now(timezone.utc)
     db.commit()
+    emit(
+        "whiteboard.deleted",
+        [f"workspace:{board.workspace_id}"],
+        payload={"whiteboard_id": str(board.id), "actor_id": str(perms.user.id)},
+        workspace_id=board.workspace_id,
+    )
     return Message(detail="Whiteboard deleted")

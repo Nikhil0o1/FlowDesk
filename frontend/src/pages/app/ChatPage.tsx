@@ -39,11 +39,13 @@ interface ChannelMember {
 }
 
 export default function ChatPage() {
-  const { workspace } = useCurrentContext()
+  const { org, workspace } = useCurrentContext()
   const channels = useChannels(workspace?.id)
   const [params, setParams] = useSearchParams()
   const queryClient = useQueryClient()
   const [createOpen, setCreateOpen] = useState(params.get('new') === '1')
+  const canManage =
+    workspace?.my_role === 'admin' || workspace?.my_role === 'owner' || org?.my_role === 'owner'
 
   const channelId = params.get('channel') ?? channels.data?.[0]?.id ?? null
   const channel = channels.data?.find((c) => c.id === channelId) ?? null
@@ -64,9 +66,11 @@ export default function ChatPage() {
       <div className="flex w-60 shrink-0 flex-col border-r border-ink-700 bg-ink-850/50">
         <div className="flex items-center justify-between px-4 py-3.5">
           <h2 className="text-sm font-bold text-fg">Chat</h2>
-          <button className="btn-ghost !p-1.5" onClick={() => setCreateOpen(true)} title="New channel">
-            <Plus size={15} />
-          </button>
+          {canManage && (
+            <button className="btn-ghost !p-1.5" onClick={() => setCreateOpen(true)} title="New channel">
+              <Plus size={15} />
+            </button>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-4">
           <p className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-fg-muted">
@@ -107,18 +111,24 @@ export default function ChatPage() {
           <EmptyState
             icon={MessageCircle}
             title="No channels yet"
-            description="Create a channel to start chatting with your team."
+            description={
+              canManage
+                ? 'Create a channel to start chatting with your team.'
+                : 'A workspace admin can create channels for your team.'
+            }
             action={
-              <button className="btn-primary" onClick={() => setCreateOpen(true)}>
-                <Plus size={14} /> New channel
-              </button>
+              canManage ? (
+                <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+                  <Plus size={14} /> New channel
+                </button>
+              ) : undefined
             }
           />
         </div>
       )}
 
       <CreateChannelModal
-        open={createOpen}
+        open={createOpen && canManage}
         onClose={() => setCreateOpen(false)}
         workspaceId={workspace?.id}
         onCreated={(id) => selectChannel(id)}
@@ -132,6 +142,7 @@ function Conversation({ channel }: { channel: Channel }) {
   const user = useAuthStore((s) => s.user)
   const setSearchOpen = useUIStore((s) => s.setSearchOpen)
   const [body, setBody] = useState('')
+  const [mentionMap, setMentionMap] = useState<Map<string, string>>(new Map())
   const [typingUsers, setTypingUsers] = useState<Map<string, number>>(new Map())
   const [bannerDismissed, setBannerDismissed] = useState(
     () => localStorage.getItem(`flowdesk-chat-banner-${channel.id}`) === '1',
@@ -207,10 +218,28 @@ function Conversation({ channel }: { channel: Channel }) {
     }
   }, [messages.data?.items.length, channel.id])
 
+  const serializeMentions = (text: string): string => {
+    if (mentionMap.size === 0) return text
+    // Replace longest names first so "@Alice Smith" wins over "@Alice".
+    const entries = [...mentionMap.entries()].sort((a, b) => b[0].length - a[0].length)
+    let out = text
+    for (const [name, id] of entries) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      // Match "@Name" only when not immediately followed by a word char,
+      // so "@John" doesn't accidentally match inside "@Johnny".
+      out = out.replace(new RegExp(`@${escaped}(?!\\w)`, 'g'), `@[${name}](${id})`)
+    }
+    return out
+  }
+
   const send = useMutation({
-    mutationFn: () => api.post<ChatMessage>(`/channels/${channel.id}/messages`, { body: body.trim() }),
+    mutationFn: () =>
+      api.post<ChatMessage>(`/channels/${channel.id}/messages`, {
+        body: serializeMentions(body.trim()),
+      }),
     onSuccess: () => {
       setBody('')
+      setMentionMap(new Map())
       void queryClient.invalidateQueries({ queryKey: ['messages', channel.id] })
     },
     onError: (err) => toast.error(errorMessage(err)),
@@ -446,6 +475,13 @@ function Conversation({ channel }: { channel: Channel }) {
               setBody(v)
               onTyping()
             }}
+            onMention={(name, userId) =>
+              setMentionMap((prev) => {
+                const next = new Map(prev)
+                next.set(name, userId)
+                return next
+              })
+            }
             onSubmit={() => body.trim() && send.mutate()}
           />
           <div className="mt-1 flex items-center gap-1">
@@ -499,9 +535,10 @@ const MentionComposer = forwardRef<
     members: ChannelMember[]
     value: string
     onChange: (v: string) => void
+    onMention?: (name: string, userId: string) => void
     onSubmit: () => void
   }
->(function MentionComposer({ channelLabel, members, value, onChange, onSubmit }, ref) {
+>(function MentionComposer({ channelLabel, members, value, onChange, onMention, onSubmit }, ref) {
   const [mentionQuery, setMentionQuery] = useState<string | null>(null)
   const [highlightIndex, setHighlightIndex] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -545,11 +582,10 @@ const MentionComposer = forwardRef<
     const cursor = textarea.selectionStart
     const before = value.slice(0, cursor)
     const after = value.slice(cursor)
-    const replaced = before.replace(
-      /(^|\s)@(\w*)$/,
-      `$1@[${member.user.full_name || member.user.email}](${member.user_id}) `,
-    )
+    const name = member.user.full_name || member.user.email
+    const replaced = before.replace(/(^|\s)@(\w*)$/, `$1@${name} `)
     onChange(replaced + after)
+    onMention?.(name, member.user_id)
     setMentionQuery(null)
     setTimeout(() => {
       textarea.focus()
@@ -637,6 +673,7 @@ function MembersModal({
 }) {
   const queryClient = useQueryClient()
   const user = useAuthStore((s) => s.user)
+  const { org, workspace } = useCurrentContext()
   const [selected, setSelected] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
 
@@ -649,6 +686,11 @@ function MembersModal({
   const memberIds = new Set(members.map((m) => m.user_id))
   const addable = (workspaceMembers.data ?? []).filter((m) => !memberIds.has(m.user_id))
   const myRole = members.find((m) => m.user_id === user?.id)?.role
+  const canManageMembers =
+    myRole === 'admin' ||
+    workspace?.my_role === 'admin' ||
+    workspace?.my_role === 'owner' ||
+    org?.my_role === 'owner'
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ['channel-members', channel.id] })
@@ -697,7 +739,7 @@ function MembersModal({
                 {member.user_id === user?.id && <span className="text-fg-muted"> (you)</span>}
               </span>
               <span className="text-[10px] uppercase text-fg-muted">{member.role}</span>
-              {(myRole === 'admin' || member.user_id === user?.id) && (
+              {(canManageMembers || member.user_id === user?.id) && (
                 <button
                   className="hidden text-fg-muted hover:text-red-400 group-hover:block"
                   onClick={() => remove(member.user_id)}
@@ -710,7 +752,7 @@ function MembersModal({
           ))}
         </div>
 
-        {addable.length > 0 ? (
+        {canManageMembers && addable.length > 0 ? (
           <div className="border-t border-ink-700 pt-3">
             <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-fg-secondary">
               <UserPlus size={13} /> Add people

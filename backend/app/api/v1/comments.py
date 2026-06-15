@@ -84,7 +84,7 @@ def create_comment(
     task = db.get(Task, task_id)
     if not task or task.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Task not found")
-    project = perms.require_project_view(task.project_id)
+    project = perms.require_project_edit(task.project_id)
 
     parent: Comment | None = None
     if body.parent_comment_id:
@@ -124,14 +124,7 @@ def create_comment(
         workspace_id=project.workspace_id,
         project_id=project.id,
     )
-    if mentioned:
-        emit(
-            "mention.created",
-            [f"user:{uid}" for uid in mentioned],
-            payload={"comment_id": str(comment.id), "task_id": str(task_id)},
-            project_id=project.id,
-            workspace_id=project.workspace_id,
-        )
+    comment_id_str = str(comment.id)
 
     # Reply notification (skip if the parent author was already mentioned)
     if parent and parent.author_id != perms.user.id and parent.author_id not in mentioned:
@@ -149,16 +142,27 @@ def create_comment(
             )
 
     task_service.log_task_activity(
-        db, project, task, "comment.created", perms.user.id, {"comment_id": str(comment.id)}
+        db, project, task, "comment.created", perms.user.id, {"comment_id": comment_id_str}
     )
+    comment_body = comment.body
+    db.commit()
+    # Emit only after commit so receivers refetch committed data
+    if mentioned:
+        emit(
+            "mention.created",
+            [f"user:{uid}" for uid in mentioned],
+            payload={"comment_id": comment_id_str, "task_id": str(task_id)},
+            project_id=project.id,
+            workspace_id=project.workspace_id,
+        )
     emit(
         "comment.created",
         task_service.task_rooms(project),
         payload={
-            "comment_id": str(comment.id),
+            "comment_id": comment_id_str,
             "task_id": str(task_id),
             "author_id": str(perms.user.id),
-            "body": comment.body,
+            "body": comment_body,
             "parent_comment_id": str(body.parent_comment_id) if body.parent_comment_id else None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -166,7 +170,6 @@ def create_comment(
         workspace_id=project.workspace_id,
         task_id=task_id,
     )
-    db.commit()
 
     out = CommentOut.model_validate(comment)
     out.author = user_brief(db, perms.user.id)
@@ -188,13 +191,13 @@ def update_comment(
     if comment.author_id != perms.user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own comments")
     comment.body = body.body
+    db.commit()
     emit(
         "comment.updated",
         task_service.task_rooms(project),
         payload={"comment_id": str(comment.id), "task_id": str(task.id), "body": comment.body},
         project_id=project.id, workspace_id=project.workspace_id, task_id=task.id,
     )
-    db.commit()
     out = CommentOut.model_validate(comment)
     out.author = user_brief(db, comment.author_id)
     return out
@@ -216,11 +219,11 @@ def delete_comment(
         # Admins may moderate
         perms.require_project_admin(task.project_id)
     comment.deleted_at = datetime.now(timezone.utc)
+    db.commit()
     emit(
         "comment.deleted",
         task_service.task_rooms(project),
         payload={"comment_id": str(comment.id), "task_id": str(task.id)},
         project_id=project.id, workspace_id=project.workspace_id, task_id=task.id,
     )
-    db.commit()
     return Message(detail="Comment deleted")

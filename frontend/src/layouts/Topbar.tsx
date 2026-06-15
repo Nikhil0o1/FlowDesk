@@ -92,9 +92,25 @@ export function Topbar() {
   const unread = useUnreadNotifications()
   const queryClient = useQueryClient()
 
-  useRealtime('notification.created', () => {
+  useRealtime('notification.created', (event) => {
     void queryClient.invalidateQueries({ queryKey: ['notifications-unread'] })
     void queryClient.invalidateQueries({ queryKey: ['notifications'] })
+    const notificationType = event.payload.type
+    const roleOrMembershipChanged =
+      notificationType === 'workspace_role_changed' ||
+      notificationType === 'workspace_member_removed' ||
+      notificationType === 'team_member_added' ||
+      notificationType === 'team_role_changed' ||
+      notificationType === 'team_member_removed'
+    if (roleOrMembershipChanged) {
+      void queryClient.invalidateQueries({ queryKey: ['organizations'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspace-members'] })
+      void queryClient.invalidateQueries({ queryKey: ['teams'] })
+      void queryClient.invalidateQueries({ queryKey: ['spaces'] })
+      void queryClient.invalidateQueries({ queryKey: ['projects'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspace-task-stats'] })
+    }
   })
 
   useEffect(() => {

@@ -9,6 +9,7 @@ import {
   PieChart,
   Plus,
   RefreshCw,
+  X,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -19,10 +20,12 @@ import { getRecents } from '../../lib/recents'
 import type { WorkspaceTaskStats } from '../../lib/types'
 import { cn, timeAgo } from '../../lib/utils'
 import { toast } from '../../stores/toast'
+import { EmptyState } from '../../components/ui/EmptyState'
 import { CenteredSpinner } from '../../components/ui/Spinner'
 
 export default function DashboardPage() {
-  const { workspace } = useCurrentContext()
+  const { org, workspace, isLoading } = useCurrentContext()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
 
   // Cards silently refresh every 60s — no UI chrome for it
@@ -35,10 +38,37 @@ export default function DashboardPage() {
     return () => window.clearInterval(id)
   }, [queryClient])
 
-  if (!workspace) return <CenteredSpinner />
+  if (isLoading) return <CenteredSpinner />
+
+  // A fresh organization has no workspaces yet — onboard instead of spinning forever
+  if (!workspace) {
+    const isOwner = org?.my_role === 'owner'
+    return (
+      <div className="flex h-full items-center justify-center px-8">
+        <EmptyState
+          icon={LayoutGrid}
+          title={org ? `Welcome to ${org.name}` : 'No workspace yet'}
+          description={
+            isOwner
+              ? 'Create your first workspace — it holds your spaces, projects, sprints and chat.'
+              : 'You are not in any workspace yet. Ask your organization owner to add you to one.'
+          }
+          action={
+            isOwner ? (
+              <button className="btn-primary" onClick={() => navigate('/app/workspaces?new=1')}>
+                <Plus size={14} /> Create your first workspace
+              </button>
+            ) : undefined
+          }
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto max-w-7xl px-8 py-6">
+      <ConnectGoogleBanner />
+
       {/* Header */}
       <div className="flex flex-wrap items-center gap-2">
         <span
@@ -60,6 +90,57 @@ export default function DashboardPage() {
         <ListsCard className="col-span-2 max-lg:col-span-1" />
         <SpacesCard className="col-span-2 max-lg:col-span-1" />
       </div>
+    </div>
+  )
+}
+
+/** One-time nudge to finish the Google Workspace consent (Calendar/Gmail/Sheets).
+ *  Sign-in only proves identity; the API scopes need their own consent. */
+function ConnectGoogleBanner() {
+  const [dismissed, setDismissed] = useState(
+    () => localStorage.getItem('google-connect-dismissed') === '1',
+  )
+  const status = useQuery({
+    queryKey: ['google-status'],
+    queryFn: () =>
+      api.get<{ configured: boolean; connected: boolean }>('/integrations/google/status'),
+    staleTime: 5 * 60_000,
+  })
+
+  if (dismissed || !status.data?.configured || status.data.connected) return null
+
+  const connect = async () => {
+    try {
+      const { url } = await api.get<{ url: string }>('/calendar/google/auth-url?next=apps')
+      window.location.href = url
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  return (
+    <div className="mb-5 flex items-center gap-3 rounded-xl border border-brand/40 bg-brand-soft px-4 py-3">
+      <p className="min-w-0 flex-1 text-sm text-fg">
+        <span className="font-semibold">Connect your Google account</span>
+        <span className="text-fg-secondary">
+          {' '}
+          — one approval enables your Calendar in the Planner, invites from your Gmail, task emails
+          and Sheets export.
+        </span>
+      </p>
+      <button className="btn-primary !py-1.5 text-xs" onClick={() => void connect()}>
+        Connect
+      </button>
+      <button
+        className="text-fg-muted hover:text-fg"
+        title="Dismiss"
+        onClick={() => {
+          localStorage.setItem('google-connect-dismissed', '1')
+          setDismissed(true)
+        }}
+      >
+        <X size={15} />
+      </button>
     </div>
   )
 }

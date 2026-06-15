@@ -9,6 +9,7 @@ from app.api.deps import get_current_user, get_permissions
 from app.core.rate_limit import limiter
 from app.db.session import get_db
 from app.models.chat import ChatChannel, ChatMember
+from app.models.organization import OrganizationMember
 from app.models.project import Project
 from app.models.task import CustomStatus, Task
 from app.models.user import User
@@ -27,6 +28,7 @@ from app.schemas.workspace import (
 )
 from app.services import invite_service
 from app.services.audit_service import audit
+from app.services.notification_service import notify
 from app.services.permission_service import PermissionService
 from app.services.user_service import user_briefs
 
@@ -52,13 +54,9 @@ def list_workspaces(
             .where(Workspace.organization_id == org_id, Workspace.deleted_at.is_(None))
             .order_by(Workspace.created_at)
         ).all()
-        roles = {
-            m.workspace_id: m.role
-            for m in db.scalars(
-                select(WorkspaceMember).where(WorkspaceMember.user_id == perms.user.id)
-            ).all()
-        }
-        return [_with_role(ws, roles.get(ws.id, "owner")) for ws in workspaces]
+        # The org owner is the workspace owner everywhere, regardless of any
+        # explicit membership row (which may carry a lesser role).
+        return [_with_role(ws, "owner") for ws in workspaces]
     rows = db.execute(
         select(Workspace, WorkspaceMember.role)
         .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
@@ -90,8 +88,8 @@ def create_workspace(
     )
     db.add(ws)
     db.flush()
-    # Creator joins as workspace admin
-    db.add(WorkspaceMember(workspace_id=ws.id, user_id=perms.user.id, role="admin"))
+    # Creator is the org owner (require_org_owner above) — record them as owner
+    db.add(WorkspaceMember(workspace_id=ws.id, user_id=perms.user.id, role="owner"))
     # Default chat channel
     channel = ChatChannel(workspace_id=ws.id, name="general", created_by=perms.user.id)
     db.add(channel)
@@ -100,7 +98,7 @@ def create_workspace(
     audit(db, "workspace.created", organization_id=org_id, actor_id=perms.user.id,
           target_type="workspace", target_id=ws.id, data={"name": ws.name})
     db.commit()
-    return _with_role(ws, "admin")
+    return _with_role(ws, "owner")
 
 
 @router.get("/workspaces/{workspace_id}", response_model=WorkspaceOut)
@@ -111,7 +109,7 @@ def get_workspace(
 ):
     ws = perms.require_workspace_member(workspace_id)
     role = perms.workspace_role(workspace_id)
-    if role is None and perms.org_role(ws.organization_id) == "owner":
+    if perms.org_role(ws.organization_id) == "owner":
         role = "owner"
     return _with_role(ws, role)
 
@@ -186,6 +184,8 @@ def workspace_task_stats(
     """Open-task counts by status across the projects this user can see."""
     perms.require_workspace_member(workspace_id)
     accessible = perms.accessible_project_ids()
+    if not accessible:
+        return WorkspaceTaskStats(total=0, by_status=[])
     base_filter = [
         Task.deleted_at.is_(None),
         Task.is_archived.is_(False),
@@ -195,7 +195,7 @@ def workspace_task_stats(
                 Project.workspace_id == workspace_id, Project.deleted_at.is_(None)
             )
         ),
-        Task.project_id.in_(accessible) if accessible else Task.project_id.is_(None),
+        Task.project_id.in_(accessible),
     ]
     rows = db.execute(
         select(CustomStatus.name, CustomStatus.color, func.count(Task.id))
@@ -214,17 +214,29 @@ def list_workspace_members(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    perms.require_workspace_member(workspace_id)
+    ws = perms.require_workspace_member(workspace_id)
     members = db.scalars(
         select(WorkspaceMember)
         .where(WorkspaceMember.workspace_id == workspace_id)
         .order_by(WorkspaceMember.created_at)
     ).all()
     briefs = user_briefs(db, [m.user_id for m in members])
+    # Org owners always surface as "owner", even if their membership row
+    # predates that rule and carries a lesser role.
+    owner_ids = set(
+        db.scalars(
+            select(OrganizationMember.user_id).where(
+                OrganizationMember.organization_id == ws.organization_id,
+                OrganizationMember.role == "owner",
+            )
+        ).all()
+    )
     result = []
     for m in members:
         out = WorkspaceMemberOut.model_validate(m)
         out.user = briefs.get(m.user_id)
+        if m.user_id in owner_ids:
+            out.role = "owner"
         result.append(out)
     return result
 
@@ -237,7 +249,10 @@ def update_workspace_member_role(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    ws = perms.require_workspace_admin(workspace_id)
+    ws = perms.require_workspace_member(workspace_id)
+    actor_role = "owner" if perms.org_role(ws.organization_id) == "owner" else perms.workspace_role(workspace_id)
+    if actor_role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Workspace admin access required")
     member = db.scalar(
         select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == workspace_id,
@@ -246,10 +261,38 @@ def update_workspace_member_role(
     )
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
+    target_is_owner = db.scalar(
+        select(OrganizationMember.id).where(
+            OrganizationMember.organization_id == ws.organization_id,
+            OrganizationMember.user_id == member_user_id,
+            OrganizationMember.role == "owner",
+        )
+    ) is not None
+    if target_is_owner or member.role == "owner":
+        raise HTTPException(status_code=403, detail="Workspace owners cannot be changed here")
+    if actor_role == "admin" and member.role not in ("admin", "member"):
+        raise HTTPException(status_code=403, detail="Workspace admins can only manage admins and members")
+    old_role = member.role
+    if old_role == body.role:
+        return Message(detail="Role unchanged")
     member.role = body.role
     audit(db, "member.role_changed", organization_id=ws.organization_id, actor_id=perms.user.id,
           target_type="workspace_member", target_id=member_user_id,
-          data={"workspace_id": str(workspace_id), "role": body.role})
+          data={"workspace_id": str(workspace_id), "old_role": old_role, "role": body.role})
+    notify(
+        db,
+        member_user_id,
+        "workspace_role_changed",
+        "Your workspace role changed",
+        f"Your role in {ws.name} changed from {old_role} to {body.role}.",
+        data={
+            "workspace_id": str(workspace_id),
+            "old_role": old_role,
+            "role": body.role,
+            "actor_id": str(perms.user.id),
+        },
+        workspace_id=workspace_id,
+    )
     db.commit()
     return Message(detail="Role updated")
 
@@ -261,7 +304,10 @@ def remove_workspace_member(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    ws = perms.require_workspace_admin(workspace_id)
+    ws = perms.require_workspace_member(workspace_id)
+    actor_role = "owner" if perms.org_role(ws.organization_id) == "owner" else perms.workspace_role(workspace_id)
+    if actor_role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Workspace admin access required")
     member = db.scalar(
         select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == workspace_id,
@@ -270,10 +316,30 @@ def remove_workspace_member(
     )
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
+    target_is_owner = db.scalar(
+        select(OrganizationMember.id).where(
+            OrganizationMember.organization_id == ws.organization_id,
+            OrganizationMember.user_id == member_user_id,
+            OrganizationMember.role == "owner",
+        )
+    ) is not None
+    if target_is_owner or member.role == "owner":
+        raise HTTPException(status_code=403, detail="Workspace owners cannot be removed here")
+    if actor_role == "admin" and member.role != "member":
+        raise HTTPException(status_code=403, detail="Workspace admins can only remove members")
     db.delete(member)
     audit(db, "member.removed", organization_id=ws.organization_id, actor_id=perms.user.id,
           target_type="workspace_member", target_id=member_user_id,
           data={"workspace_id": str(workspace_id)})
+    notify(
+        db,
+        member_user_id,
+        "workspace_member_removed",
+        "You were removed from a workspace",
+        f"You were removed from {ws.name}.",
+        data={"workspace_id": str(workspace_id), "actor_id": str(perms.user.id)},
+        workspace_id=workspace_id,
+    )
     db.commit()
     return Message(detail="Member removed")
 

@@ -52,6 +52,21 @@ export default function LoginPage() {
     }
   }, [navigate])
 
+  // Render Google's official button: unlike One Tap (`prompt()`), it opens a
+  // sign-in popup that works even when the browser has no Google session.
+  useEffect(() => {
+    if (googleReady && googleBtnRef.current) {
+      window.google?.accounts.id.renderButton(googleBtnRef.current, {
+        theme: 'outline',
+        size: 'large',
+        text: 'continue_with',
+        shape: 'rectangular',
+        logo_alignment: 'center',
+        width: 360,
+      })
+    }
+  }, [googleReady])
+
   if (initialized && user) {
     return <Navigate to={user.is_platform_superadmin ? '/admin/platform' : '/app/dashboard'} replace />
   }
@@ -76,9 +91,9 @@ export default function LoginPage() {
   const onGoogleClick = () => {
     if (!GOOGLE_CLIENT_ID) {
       setError('Google SSO is not configured. Set VITE_GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID.')
-      return
     }
-    window.google?.accounts.id.prompt()
+    // Script still loading — the official Google button replaces this one
+    // as soon as it's ready.
   }
 
   return (
@@ -89,9 +104,7 @@ export default function LoginPage() {
 
       <div className="mt-7 w-full space-y-3">
         {googleReady ? (
-          <div ref={googleBtnRef} className="flex justify-center">
-            <GoogleLoginButton onClick={onGoogleClick} />
-          </div>
+          <div ref={googleBtnRef} className="flex justify-center" />
         ) : (
           <GoogleLoginButton onClick={onGoogleClick} />
         )}

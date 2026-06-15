@@ -25,6 +25,7 @@ JOB_DEFS = [
     ("recurring_task_generation", jobs.recurring_task_generation, IntervalTrigger(minutes=15)),
     ("sprint_completion_reminder", jobs.sprint_completion_reminder, CronTrigger(hour=9, minute=0)),
     ("cleanup_expired_invites", jobs.cleanup_expired_invites, CronTrigger(hour=2, minute=0)),
+    ("google_sheet_sync", jobs.google_sheet_sync, IntervalTrigger(minutes=10)),
 ]
 
 

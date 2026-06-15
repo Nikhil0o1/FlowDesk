@@ -92,6 +92,8 @@ Roles are **memberships, never global flags** (the single exception is `is_platf
 | Invite users | — | ✅ | ✅ WS/projects | ❌ |
 | Tasks, comments, chat, time tracking | — | ✅ | ✅ | ✅ |
 
+**Scrum master** is a per-sprint role, not a rank: workspace admins (or the current scrum master) can assign any workspace member as scrum master of a sprint, which lets that person edit/start/complete *that sprint only* — no other admin rights.
+
 Every protected endpoint passes through a central `PermissionService`; resources you can't see return **404**, not 403.
 
 ## Documentation
@@ -146,7 +148,7 @@ The suite provisions an isolated `flowdesk_test` database and covers login, refr
 
 | Integration | How to enable |
 | --- | --- |
-| **Google SSO + Calendar** | Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID` in `.env`; add `http://localhost:8000/api/v1/calendar/google/callback` as an authorized redirect URI |
+| **Google SSO + Calendar + Gmail + Sheets** | Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID` in `.env`; add `http://localhost:8000/api/v1/calendar/google/callback` as an authorized redirect URI and `http://localhost:5173` as an authorized origin; enable the Calendar, Gmail and Sheets APIs. One in-app connect (App Center → Google Workspace) covers calendar feed, invite emails via the inviter's Gmail, task-related email lookup, and Sheets export, one-way/two-way live sync (sheet edits and new rows flow back into FlowDesk) and time tracking reports |
 | **GitHub** | Point a webhook at `/api/v1/github/webhook` (push, pull_request, issues) and set `GITHUB_WEBHOOK_SECRET`; connect repos from the App Center |
 | **S3 storage** | `STORAGE_BACKEND=s3` + `S3_*` vars (`pip install boto3`) |
 

@@ -47,6 +47,11 @@ class SprintTaskAdd(BaseModel):
     task_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
 
 
+class SprintCompleteRequest(BaseModel):
+    """Optional rollover: move unfinished tasks into another sprint on completion."""
+    move_incomplete_to: uuid.UUID | None = None
+
+
 class BurndownPoint(BaseModel):
     day: date
     remaining_points: int

@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CalendarRange, CheckCircle2, Play, Plus, Target, Zap } from 'lucide-react'
+import { CalendarRange, CheckCircle2, MoreHorizontal, Pencil, Play, Plus, Target, Trash2, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
-import { useCurrentContext, useProjects, useSprints, useStatuses } from '../../lib/queries'
+import { useCurrentContext, useProjects, useSprints, useStatuses, useWorkspaceMembers } from '../../lib/queries'
 import type { Page, Sprint, SprintBurndown, Standup, Task } from '../../lib/types'
 import { cn, formatDate } from '../../lib/utils'
 import { useRealtime } from '../../lib/ws'
@@ -12,6 +12,7 @@ import { useAuthStore } from '../../stores/auth'
 import { toast } from '../../stores/toast'
 import { KanbanBoard } from '../../components/tasks/KanbanBoard'
 import { Avatar } from '../../components/ui/Avatar'
+import { Dropdown } from '../../components/ui/Dropdown'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Modal } from '../../components/ui/Modal'
 import { CenteredSpinner } from '../../components/ui/Spinner'
@@ -123,6 +124,11 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
   const queryClient = useQueryClient()
   const user = useAuthStore((s) => s.user)
   const [tab, setTab] = useState<'board' | 'backlog' | 'burndown' | 'standups'>('board')
+  const [addTaskOpen, setAddTaskOpen] = useState(false)
+  const [completeOpen, setCompleteOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [params, setParams] = useSearchParams()
 
   const tasks = useQuery({
     queryKey: ['sprint-tasks', sprint.id],
@@ -131,11 +137,24 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
 
   const isScrumMaster = sprint.scrum_master_id === user?.id
   const canRun = canManage || isScrumMaster
+  const incompleteCount = (tasks.data ?? []).filter((t) => !t.completed_at).length
 
   const act = useMutation({
     mutationFn: (action: 'start' | 'complete') => api.post<Sprint>(`/sprints/${sprint.id}/${action}`),
     onSuccess: (_, action) => {
       toast.success(`Sprint ${action === 'start' ? 'started' : 'completed'}`)
+      void queryClient.invalidateQueries({ queryKey: ['sprints'] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const del = useMutation({
+    mutationFn: () => api.delete(`/sprints/${sprint.id}`),
+    onSuccess: () => {
+      toast.success('Sprint deleted')
+      setConfirmDelete(false)
+      params.delete('sprint')
+      setParams(params, { replace: true })
       void queryClient.invalidateQueries({ queryKey: ['sprints'] })
     },
     onError: (err) => toast.error(errorMessage(err)),
@@ -159,15 +178,60 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
               Scrum master
             </span>
           )}
+          {sprint.status !== 'completed' && (
+            <button className="btn-secondary !py-1.5 text-xs" onClick={() => setAddTaskOpen(true)}>
+              <Plus size={13} /> Add Task
+            </button>
+          )}
           {canRun && sprint.status === 'planned' && (
             <button className="btn-primary !py-1.5 text-xs" onClick={() => act.mutate('start')} disabled={act.isPending}>
               <Play size={13} /> Start sprint
             </button>
           )}
           {canRun && sprint.status === 'active' && (
-            <button className="btn-secondary !py-1.5 text-xs" onClick={() => act.mutate('complete')} disabled={act.isPending}>
+            <button
+              className="btn-secondary !py-1.5 text-xs"
+              onClick={() => (incompleteCount > 0 ? setCompleteOpen(true) : act.mutate('complete'))}
+              disabled={act.isPending}
+            >
               <CheckCircle2 size={13} /> Complete sprint
             </button>
+          )}
+          {canRun && (
+            <Dropdown
+              align="right"
+              width="w-44"
+              trigger={
+                <button className="btn-ghost !p-1.5" title="Sprint options">
+                  <MoreHorizontal size={15} />
+                </button>
+              }
+            >
+              {(close) => (
+                <>
+                  <button
+                    className="menu-item"
+                    onClick={() => {
+                      setEditOpen(true)
+                      close()
+                    }}
+                  >
+                    <Pencil size={14} className="text-fg-muted" /> Edit sprint
+                  </button>
+                  {canManage && (
+                    <button
+                      className="menu-item !text-red-400"
+                      onClick={() => {
+                        setConfirmDelete(true)
+                        close()
+                      }}
+                    >
+                      <Trash2 size={14} /> Delete sprint
+                    </button>
+                  )}
+                </>
+              )}
+            </Dropdown>
           )}
         </div>
         {sprint.goal && (
@@ -221,7 +285,233 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
         {tab === 'burndown' && <Burndown sprintId={sprint.id} />}
         {tab === 'standups' && <Standups sprintId={sprint.id} />}
       </div>
+
+      <AddSprintTaskModal sprint={sprint} open={addTaskOpen} onClose={() => setAddTaskOpen(false)} />
+      <CompleteSprintModal
+        sprint={sprint}
+        incompleteCount={incompleteCount}
+        open={completeOpen}
+        onClose={() => setCompleteOpen(false)}
+      />
+      <EditSprintModal sprint={sprint} open={editOpen} onClose={() => setEditOpen(false)} />
+      <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete sprint" width="max-w-sm">
+        <div className="space-y-4">
+          <p className="text-sm text-fg-secondary">
+            Delete <span className="font-semibold text-fg">{sprint.name}</span>? Tasks stay in their
+            projects — only the sprint and its planning data are removed.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button className="btn-secondary !py-1.5 text-xs" onClick={() => setConfirmDelete(false)}>
+              Cancel
+            </button>
+            <button
+              className="btn-primary !bg-red-500 !py-1.5 text-xs hover:!bg-red-600"
+              disabled={del.isPending}
+              onClick={() => del.mutate()}
+            >
+              <Trash2 size={13} /> Delete sprint
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
+  )
+}
+
+/** Edit name, goal, dates and scrum master — sprint manager (admin / org owner / scrum master) only. */
+function EditSprintModal({ sprint, open, onClose }: { sprint: Sprint; open: boolean; onClose: () => void }) {
+  const queryClient = useQueryClient()
+  const members = useWorkspaceMembers(sprint.workspace_id)
+  const [name, setName] = useState(sprint.name)
+  const [goal, setGoal] = useState(sprint.goal ?? '')
+  const [startDate, setStartDate] = useState(sprint.start_date ?? '')
+  const [endDate, setEndDate] = useState(sprint.end_date ?? '')
+  const [scrumMasterId, setScrumMasterId] = useState(sprint.scrum_master_id ?? '')
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.patch<Sprint>(`/sprints/${sprint.id}`, {
+        name: name.trim(),
+        goal: goal.trim() || null,
+        start_date: startDate || null,
+        end_date: endDate || null,
+        scrum_master_id: scrumMasterId || null,
+      }),
+    onSuccess: () => {
+      toast.success('Sprint updated')
+      void queryClient.invalidateQueries({ queryKey: ['sprints'] })
+      onClose()
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const datesInvalid = !!startDate && !!endDate && endDate <= startDate
+
+  return (
+    <Modal open={open} onClose={onClose} title="Edit sprint" width="max-w-md">
+      <div className="space-y-3">
+        <input className="input-dark" placeholder="Sprint name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        <textarea rows={2} className="input-dark resize-none" placeholder="Sprint goal (optional)" value={goal} onChange={(e) => setGoal(e.target.value)} />
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <label className="mb-1 block text-xs text-fg-muted">Start</label>
+            <input type="date" className="input-dark" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </div>
+          <div className="flex-1">
+            <label className="mb-1 block text-xs text-fg-muted">End</label>
+            <input type="date" className="input-dark" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          </div>
+        </div>
+        {datesInvalid && <p className="text-xs text-red-400">End date must be after the start date.</p>}
+        <div>
+          <label className="mb-1 block text-xs text-fg-muted">Scrum master</label>
+          <select className="input-dark" value={scrumMasterId} onChange={(e) => setScrumMasterId(e.target.value)}>
+            <option value="">No scrum master</option>
+            {(members.data ?? []).map((m) => (
+              <option key={m.user_id} value={m.user_id}>
+                {m.user?.full_name || m.user?.email}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button className="btn-primary w-full" disabled={save.isPending || !name.trim() || datesInvalid} onClick={() => save.mutate()}>
+          Save changes
+        </button>
+      </div>
+    </Modal>
+  )
+}
+
+/** Create a task directly inside the sprint (ClickUp-style: sprints behave like lists). */
+function AddSprintTaskModal({ sprint, open, onClose }: { sprint: Sprint; open: boolean; onClose: () => void }) {
+  const queryClient = useQueryClient()
+  const projects = useProjects(sprint.workspace_id)
+  const [title, setTitle] = useState('')
+  const [projectId, setProjectId] = useState('')
+  const [creating, setCreating] = useState(false)
+
+  const effectiveProject = sprint.project_id ?? (projectId || projects.data?.[0]?.id)
+  const sprintProject = projects.data?.find((p) => p.id === sprint.project_id)
+
+  const create = async () => {
+    if (!title.trim() || !effectiveProject) return
+    setCreating(true)
+    try {
+      const task = await api.post<Task>(`/projects/${effectiveProject}/tasks`, { title: title.trim() })
+      await api.post(`/sprints/${sprint.id}/tasks`, { task_ids: [task.id] })
+      toast.success(`${task.ref} created in sprint`)
+      setTitle('')
+      void queryClient.invalidateQueries({ queryKey: ['sprint-tasks', sprint.id] })
+      void queryClient.invalidateQueries({ queryKey: ['sprints'] })
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['backlog'] })
+    } catch (err) {
+      toast.error(errorMessage(err))
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title={`Add task to ${sprint.name}`} width="max-w-md">
+      <div className="space-y-3">
+        <input
+          autoFocus
+          className="input-dark"
+          placeholder="Task name"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && title.trim() && void create()}
+        />
+        {sprint.project_id ? (
+          <p className="text-xs text-fg-muted">
+            Project: <span className="text-fg-secondary">{sprintProject?.name ?? '…'}</span>
+          </p>
+        ) : (
+          <select className="input-dark" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+            {(projects.data ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <button className="btn-primary w-full" disabled={creating || !title.trim() || !effectiveProject} onClick={() => void create()}>
+          <Plus size={14} /> Create in sprint
+        </button>
+      </div>
+    </Modal>
+  )
+}
+
+/** Complete the sprint, optionally rolling unfinished tasks into another sprint (Jira-style). */
+function CompleteSprintModal({
+  sprint,
+  incompleteCount,
+  open,
+  onClose,
+}: {
+  sprint: Sprint
+  incompleteCount: number
+  open: boolean
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const sprints = useSprints(sprint.workspace_id)
+  const [moveTo, setMoveTo] = useState('')
+
+  const targets = (sprints.data ?? []).filter(
+    (s) =>
+      s.id !== sprint.id &&
+      s.status !== 'completed' &&
+      (!s.project_id || !sprint.project_id || s.project_id === sprint.project_id),
+  )
+
+  const complete = useMutation({
+    mutationFn: () =>
+      api.post<Sprint>(`/sprints/${sprint.id}/complete`, moveTo ? { move_incomplete_to: moveTo } : {}),
+    onSuccess: () => {
+      toast.success('Sprint completed')
+      void queryClient.invalidateQueries({ queryKey: ['sprints'] })
+      void queryClient.invalidateQueries({ queryKey: ['sprint-tasks'] })
+      onClose()
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  return (
+    <Modal open={open} onClose={onClose} title={`Complete ${sprint.name}`} width="max-w-md">
+      <div className="space-y-4">
+        <p className="text-sm text-fg-secondary">
+          <span className="font-semibold text-fg">{incompleteCount}</span> task
+          {incompleteCount === 1 ? ' is' : 's are'} not done yet. Where should they go?
+        </p>
+        <div className="space-y-2">
+          <label className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-ink-700 bg-ink-900 px-3 py-2.5">
+            <input type="radio" className="accent-brand" checked={moveTo === ''} onChange={() => setMoveTo('')} />
+            <span className="text-sm text-fg">Leave them in this sprint</span>
+          </label>
+          {targets.map((s) => (
+            <label
+              key={s.id}
+              className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-ink-700 bg-ink-900 px-3 py-2.5"
+            >
+              <input type="radio" className="accent-brand" checked={moveTo === s.id} onChange={() => setMoveTo(s.id)} />
+              <span className="flex-1 text-sm text-fg">Move to {s.name}</span>
+              <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase', STATUS_STYLES[s.status])}>
+                {s.status}
+              </span>
+            </label>
+          ))}
+          {targets.length === 0 && (
+            <p className="text-xs text-fg-muted">No other open sprint to move them to — create the next sprint first if you want to roll tasks over.</p>
+          )}
+        </div>
+        <button className="btn-primary w-full" disabled={complete.isPending} onClick={() => complete.mutate()}>
+          <CheckCircle2 size={14} /> Complete sprint
+        </button>
+      </div>
+    </Modal>
   )
 }
 
@@ -268,20 +558,28 @@ function SprintBacklog({ sprint, sprintTasks }: { sprint: Sprint; sprintTasks: T
       <section>
         <div className="mb-2 flex items-center gap-3">
           <h3 className="text-sm font-semibold text-fg">Backlog</h3>
-          <select className="input-dark !w-auto !py-1 text-xs" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-            {(projects.data ?? []).map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+          {sprint.project_id ? (
+            <span className="text-xs text-fg-muted">
+              {projects.data?.find((p) => p.id === sprint.project_id)?.name ?? ''} — unscheduled tasks
+            </span>
+          ) : (
+            <select className="input-dark !w-auto !py-1 text-xs" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+              {(projects.data ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div className="overflow-hidden rounded-xl border border-ink-700">
           {available.map((task) => (
             <BacklogRow key={task.id} task={task} actionLabel="Add" onAction={() => toggle(task.id, true)} />
           ))}
           {available.length === 0 && (
-            <p className="bg-ink-900 px-4 py-3 text-sm text-fg-muted">Backlog is empty.</p>
+            <p className="bg-ink-900 px-4 py-3 text-sm text-fg-muted">
+              No open tasks left in this project's backlog. Use “Add Task” at the top to create one directly in the sprint.
+            </p>
           )}
         </div>
       </section>
@@ -446,12 +744,14 @@ function Standups({ sprintId }: { sprintId: string }) {
 function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { workspace } = useCurrentContext()
   const projects = useProjects(workspace?.id)
+  const members = useWorkspaceMembers(workspace?.id)
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [goal, setGoal] = useState('')
   const [projectId, setProjectId] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
+  const [scrumMasterId, setScrumMasterId] = useState('')
   const [creating, setCreating] = useState(false)
 
   const create = async () => {
@@ -464,6 +764,7 @@ function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => vo
         project_id: projectId || null,
         start_date: startDate || null,
         end_date: endDate || null,
+        scrum_master_id: scrumMasterId || null,
       })
       void queryClient.invalidateQueries({ queryKey: ['sprints', workspace.id] })
       toast.success('Sprint created')
@@ -499,6 +800,20 @@ function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => vo
             <label className="mb-1 block text-xs text-fg-muted">End</label>
             <input type="date" className="input-dark" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
           </div>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-fg-muted">Scrum master (optional)</label>
+          <select className="input-dark" value={scrumMasterId} onChange={(e) => setScrumMasterId(e.target.value)}>
+            <option value="">No scrum master</option>
+            {(members.data ?? []).map((m) => (
+              <option key={m.user_id} value={m.user_id}>
+                {m.user?.full_name || m.user?.email}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] text-fg-muted">
+            Any workspace member — they can edit, start and complete this sprint without needing admin rights.
+          </p>
         </div>
         <button className="btn-primary w-full" disabled={creating || !name.trim()} onClick={create}>
           {creating ? 'Creating…' : 'Create sprint'}

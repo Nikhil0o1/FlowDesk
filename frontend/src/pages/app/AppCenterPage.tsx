@@ -1,22 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Search, Trash2 } from 'lucide-react'
-import { useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { CheckCircle2, Plus, Search, Trash2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
-import { GitHubIcon, GoogleDriveIcon } from '../../components/icons/brands'
+import {
+  GitHubIcon,
+  GmailIcon,
+  GoogleCalendarIcon,
+  GoogleDocsIcon,
+  GoogleSheetsIcon,
+} from '../../components/icons/brands'
 
 import { api, errorMessage } from '../../lib/api'
 import { useCurrentContext, useProjects } from '../../lib/queries'
-import { cn, formatDate } from '../../lib/utils'
 import { toast } from '../../stores/toast'
 import { Modal } from '../../components/ui/Modal'
 
-interface Installation {
-  id: string
-  installation_id: number
-  account_login: string
-  account_type: string
-  created_at: string
+interface OAuthStatus {
+  connected: boolean
+  github_user_login: string | null
+}
+
+interface AvailableRepo {
+  repo_id: number
+  repo_full_name: string
+  default_branch: string
+  private: boolean
 }
 
 interface Repository {
@@ -30,27 +39,145 @@ interface Repository {
   created_at: string
 }
 
-const GDRIVE_CONFIGURED = !!import.meta.env.VITE_GOOGLE_CLIENT_ID
+interface GoogleStatus {
+  configured: boolean
+  connected: boolean
+  account_email: string | null
+  scopes: { calendar: boolean; gmail_send: boolean; gmail_read: boolean; sheets: boolean }
+}
 
 export default function AppCenterPage() {
   const [params, setParams] = useSearchParams()
+  const navigate = useNavigate()
   const app = params.get('app')
-  const [q, setQ] = useState('')
+  const [q, setQ] = useState(params.get('q') ?? '')
 
-  const apps = [
+  // Handle GitHub OAuth callback redirects
+  useEffect(() => {
+    if (params.get('github_connected') === '1') {
+      toast.success('GitHub connected successfully!')
+      params.delete('github_connected')
+      params.set('app', 'github')
+      setParams(params, { replace: true })
+    }
+    if (params.get('github_error') === '1') {
+      toast.error('GitHub connection failed. Please try again.')
+      params.delete('github_error')
+      setParams(params, { replace: true })
+    }
+  }, [])
+
+  // Sidebar items deep-link with ?q=<app name>
+  useEffect(() => {
+    setQ(params.get('q') ?? '')
+  }, [params])
+
+  const googleStatus = useQuery({
+    queryKey: ['google-status'],
+    queryFn: () => api.get<GoogleStatus>('/integrations/google/status'),
+  })
+  const s = googleStatus.data?.scopes
+
+  // Google tiles share ONE OAuth connection — one consent enables all of them.
+  const apps: {
+    key: string
+    name: string
+    icon: React.ReactNode
+    description: string
+    benefits?: string[]
+    action: React.ReactNode
+  }[] = [
     {
       key: 'github',
       name: 'GitHub',
       icon: <GitHubIcon size={24} className="text-white" />,
-      description: 'Link pushes, pull requests and issues to your projects. Reference tasks as KEY-123 in commits.',
-      status: 'available' as const,
+      description: 'Bring your code activity into the project it belongs to.',
+      benefits: [
+        'Pushes, PRs and issues stream into the project feed and the linked task’s Development panel',
+        'PHX-12[In Review] in a commit or PR moves the task to that status',
+        'PR opened → task moves to review; PR merged → task is completed (and people are notified)',
+        'Copy a ready-made branch name or open a pre-filled GitHub issue from any task',
+      ],
+      action: (
+        <button
+          className="btn-primary !py-1.5 text-xs"
+          onClick={() => {
+            params.set('app', 'github')
+            setParams(params, { replace: true })
+          }}
+        >
+          Manage connection
+        </button>
+      ),
     },
     {
-      key: 'gdrive',
-      name: 'Google Drive',
-      icon: <GoogleDriveIcon size={24} />,
-      description: 'Attach and preview Drive files on tasks.',
-      status: (GDRIVE_CONFIGURED ? 'soon' : 'config') as 'soon' | 'config',
+      key: 'gcal',
+      name: 'Google Calendar',
+      icon: <GoogleCalendarIcon size={24} />,
+      description: 'Your schedule and your deadlines in one place.',
+      benefits: [
+        'Planner shows your real meetings beside tasks due this week',
+        'Push any task’s due date to your calendar from the task page',
+        'Never double-book a deadline against a client call',
+      ],
+      action: (
+        <GoogleFeatureAction
+          status={googleStatus.data}
+          ok={!!s?.calendar}
+          openLabel="Open Planner"
+          onOpen={() => navigate('/app/planner')}
+        />
+      ),
+    },
+    {
+      key: 'gmail',
+      name: 'Gmail',
+      icon: <GmailIcon size={24} />,
+      description: 'Your inbox and your tasks, no tab switching.',
+      benefits: [
+        'Invitations you send go out from your own Gmail address',
+        'Every task page shows the emails that mention its ref (e.g. PHX-12)',
+        'Jump from a task straight to the email thread in Gmail',
+      ],
+      action: (
+        <GoogleFeatureAction
+          status={googleStatus.data}
+          ok={!!s?.gmail_send && !!s?.gmail_read}
+          openLabel="See it on your tasks"
+          onOpen={() => navigate('/app/list')}
+        />
+      ),
+    },
+    {
+      key: 'gsheets',
+      name: 'Google Sheets',
+      icon: <GoogleSheetsIcon size={24} />,
+      description: 'Manage projects from a spreadsheet — both directions.',
+      benefits: [
+        'Two-way sync: edit status, priority or due dates in the sheet and FlowDesk follows',
+        'Add a row to the sheet and it becomes a FlowDesk task automatically',
+        'Client-ready time reports: tracked hours with totals by user and task',
+        'Share the synced sheet with stakeholders who don’t have FlowDesk accounts',
+      ],
+      action: (
+        <GoogleFeatureAction
+          status={googleStatus.data}
+          ok={!!s?.sheets}
+          openLabel="Open a project"
+          onOpen={() => navigate('/app/workspaces')}
+        />
+      ),
+    },
+    {
+      key: 'gdocs',
+      name: 'Google Docs',
+      icon: <GoogleDocsIcon size={24} />,
+      description: 'Attach and preview Docs on tasks.',
+      action: (
+        <span className="inline-flex items-center gap-1.5 rounded-lg bg-ink-750 px-2.5 py-1.5 text-xs text-fg-muted">
+          Coming soon
+        </span>
+      ),
     },
   ].filter((a) => !q.trim() || a.name.toLowerCase().includes(q.trim().toLowerCase()))
 
@@ -77,23 +204,17 @@ export default function AppCenterPage() {
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-fg">{appDef.name}</p>
               <p className="mt-0.5 text-xs leading-relaxed text-fg-secondary">{appDef.description}</p>
-              <div className="mt-3">
-                {appDef.key === 'github' ? (
-                  <button
-                    className="btn-primary !py-1.5 text-xs"
-                    onClick={() => {
-                      params.set('app', 'github')
-                      setParams(params, { replace: true })
-                    }}
-                  >
-                    Manage connection
-                  </button>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-ink-750 px-2.5 py-1.5 text-xs text-fg-muted" title="Set GOOGLE_CLIENT_ID in the root .env to enable Google integrations">
-                    {GDRIVE_CONFIGURED ? 'Coming soon' : 'Requires Google OAuth configuration'}
-                  </span>
-                )}
-              </div>
+              {appDef.benefits && (
+                <ul className="mt-2 space-y-1">
+                  {appDef.benefits.map((b) => (
+                    <li key={b} className="flex items-start gap-1.5 text-[11px] leading-relaxed text-fg-muted">
+                      <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-brand" />
+                      {b}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-3">{appDef.action}</div>
             </div>
           </div>
         ))}
@@ -105,18 +226,101 @@ export default function AppCenterPage() {
   )
 }
 
+/** Action area for one Google tile. All tiles share the same connection:
+ *  one consent grants every scope, so Connect/Re-connect is the same flow. */
+function GoogleFeatureAction({
+  status,
+  ok,
+  openLabel,
+  onOpen,
+}: {
+  status: GoogleStatus | undefined
+  ok: boolean
+  openLabel?: string
+  onOpen?: () => void
+}) {
+  const queryClient = useQueryClient()
+
+  const connect = async () => {
+    try {
+      const { url } = await api.get<{ url: string }>('/calendar/google/auth-url?next=apps')
+      window.location.href = url
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  const disconnect = async () => {
+    try {
+      await api.delete('/calendar/google')
+      toast.success('Google account disconnected')
+      void queryClient.invalidateQueries({ queryKey: ['google-status'] })
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  if (!status) return null
+  if (!status.configured) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-lg bg-ink-750 px-2.5 py-1.5 text-xs text-fg-muted">
+        Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the root .env
+      </span>
+    )
+  }
+  if (!status.connected) {
+    return (
+      <button className="btn-primary !py-1.5 text-xs" onClick={() => void connect()} title="One approval connects Calendar, Gmail and Sheets together">
+        Connect Google account
+      </button>
+    )
+  }
+  if (!ok) {
+    return (
+      <button className="btn-secondary !py-1.5 text-xs" onClick={() => void connect()}>
+        Re-connect to grant access
+      </button>
+    )
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      {openLabel && onOpen && (
+        <button className="btn-primary !py-1.5 text-xs" onClick={onOpen}>
+          {openLabel}
+        </button>
+      )}
+      <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+        <CheckCircle2 size={13} /> Connected as {status.account_email}
+      </span>
+      <button
+        className="text-xs text-fg-muted hover:text-red-400"
+        title="Disconnects Calendar, Gmail and Sheets together"
+        onClick={() => void disconnect()}
+      >
+        Disconnect
+      </button>
+    </div>
+  )
+}
+
 function GitHubPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { org, workspace } = useCurrentContext()
   const projects = useProjects(workspace?.id)
   const queryClient = useQueryClient()
 
-  const installations = useQuery({
-    queryKey: ['gh-installations', org?.id],
-    queryFn: () => api.get<Installation[]>(`/github/organizations/${org!.id}/installations`),
+  const oauthStatus = useQuery({
+    queryKey: ['gh-oauth-status', org?.id],
+    queryFn: () => api.get<OAuthStatus>(`/github/organizations/${org!.id}/oauth-status`),
     enabled: open && !!org,
   })
 
-  const projectRepoQueries = useQuery({
+  const availableRepos = useQuery({
+    queryKey: ['gh-available-repos', org?.id],
+    queryFn: () => api.get<AvailableRepo[]>(`/github/organizations/${org!.id}/available-repos`),
+    enabled: open && !!org && oauthStatus.data?.connected === true,
+  })
+
+  const connectedRepos = useQuery({
     queryKey: ['gh-repos', workspace?.id, projects.data?.map((p) => p.id).join(',')],
     queryFn: async () => {
       const all: (Repository & { project_name: string })[] = []
@@ -129,46 +333,24 @@ function GitHubPanel({ open, onClose }: { open: boolean; onClose: () => void }) 
     enabled: open && (projects.data ?? []).length > 0,
   })
 
-  const [installationId, setInstallationId] = useState('')
-  const [accountLogin, setAccountLogin] = useState('')
-  const [repoFullName, setRepoFullName] = useState('')
-  const [repoId, setRepoId] = useState('')
-  const [repoInstallation, setRepoInstallation] = useState('')
-  const [repoProject, setRepoProject] = useState('')
-
-  const registerInstallation = useMutation({
-    mutationFn: () =>
-      api.post(`/github/organizations/${org!.id}/installations`, {
-        installation_id: parseInt(installationId, 10),
-        account_login: accountLogin.trim(),
-      }),
-    onSuccess: () => {
-      toast.success('GitHub installation registered')
-      setInstallationId('')
-      setAccountLogin('')
-      void queryClient.invalidateQueries({ queryKey: ['gh-installations'] })
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
+  const [selectedRepo, setSelectedRepo] = useState('')
+  const [selectedProject, setSelectedProject] = useState('')
 
   const connectRepo = useMutation({
     mutationFn: () =>
-      api.post('/github/repositories', {
-        installation_id: repoInstallation || installations.data?.[0]?.id,
-        repo_id: parseInt(repoId, 10),
-        repo_full_name: repoFullName.trim(),
-        project_id: repoProject || projects.data?.[0]?.id,
+      api.post(`/github/organizations/${org!.id}/connect-repo`, {
+        repo_full_name: selectedRepo,
+        project_id: selectedProject || projects.data?.[0]?.id,
       }),
     onSuccess: () => {
       toast.success('Repository connected')
-      setRepoFullName('')
-      setRepoId('')
+      setSelectedRepo('')
       void queryClient.invalidateQueries({ queryKey: ['gh-repos'] })
     },
     onError: (err) => toast.error(errorMessage(err)),
   })
 
-  const disconnect = async (repoId: string) => {
+  const disconnectRepo = async (repoId: string) => {
     try {
       await api.delete(`/github/repositories/${repoId}`)
       toast.success('Repository disconnected')
@@ -178,87 +360,133 @@ function GitHubPanel({ open, onClose }: { open: boolean; onClose: () => void }) 
     }
   }
 
-  const hasInstallation = (installations.data ?? []).length > 0
+  const disconnectGitHub = useMutation({
+    mutationFn: () => api.delete(`/github/oauth/disconnect?org_id=${org!.id}`),
+    onSuccess: () => {
+      toast.success('GitHub disconnected')
+      void queryClient.invalidateQueries({ queryKey: ['gh-oauth-status'] })
+      void queryClient.invalidateQueries({ queryKey: ['gh-repos'] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const startOAuth = async () => {
+    try {
+      const { url } = await api.get<{ url: string }>(`/github/oauth/authorize?org_id=${org!.id}`)
+      window.location.href = url
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  const isConnected = oauthStatus.data?.connected === true
+  const activeRepos = (connectedRepos.data ?? []).filter((r) => r.is_active)
+  const alreadyConnectedNames = new Set(activeRepos.map((r) => r.repo_full_name))
+  const repoOptions = (availableRepos.data ?? []).filter((r) => !alreadyConnectedNames.has(r.repo_full_name))
 
   return (
-    <Modal open={open} onClose={onClose} title="GitHub integration" width="max-w-lg">
-      <div className="space-y-5">
-        <p className="text-xs leading-relaxed text-fg-muted">
-          Point your GitHub App or repository webhook at{' '}
-          <code className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-fg-secondary">
-            /api/v1/github/webhook
-          </code>{' '}
-          (events: push, pull_request, issues) and set the same secret in{' '}
-          <code className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-fg-secondary">GITHUB_WEBHOOK_SECRET</code>.
-        </p>
+    <Modal open={open} onClose={onClose} title="GitHub" width="max-w-lg">
+      <div className="space-y-6">
 
-        {/* Installations */}
+        {/* Step 1 — Connect GitHub account */}
         <section>
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-muted">Installations</p>
-          {(installations.data ?? []).map((inst) => (
-            <div key={inst.id} className="mb-1 flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-900 px-3 py-2">
-              <GitHubIcon size={13} className="text-fg-secondary" />
-              <span className="flex-1 text-sm text-fg">{inst.account_login}</span>
-              <span className="text-[11px] text-fg-muted">#{inst.installation_id} · {formatDate(inst.created_at)}</span>
-            </div>
-          ))}
-          {org?.my_role === 'owner' ? (
-            <div className="mt-2 flex gap-2">
-              <input className="input-dark !w-32" placeholder="Installation ID" value={installationId} onChange={(e) => setInstallationId(e.target.value.replace(/\D/g, ''))} />
-              <input className="input-dark flex-1" placeholder="GitHub account/org login" value={accountLogin} onChange={(e) => setAccountLogin(e.target.value)} />
-              <button
-                className="btn-secondary !px-3 text-xs"
-                disabled={!installationId || !accountLogin.trim() || registerInstallation.isPending}
-                onClick={() => registerInstallation.mutate()}
-              >
-                <Plus size={13} />
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-fg-muted">
+            Step 1 — Connect GitHub account
+          </p>
+          {!isConnected ? (
+            <div className="flex items-center justify-between rounded-xl border border-ink-700 bg-ink-900 px-4 py-3">
+              <p className="text-sm text-fg-secondary">Authorise FlowDesk to access your GitHub repositories.</p>
+              <button className="btn-primary !py-1.5 text-xs" onClick={() => void startOAuth()}>
+                Connect GitHub
               </button>
             </div>
           ) : (
-            !hasInstallation && <p className="text-xs text-fg-muted">Ask your organization owner to register the GitHub App installation.</p>
+            <div className="flex items-center gap-3 rounded-xl border border-emerald-800/60 bg-emerald-950/30 px-4 py-3">
+              <GitHubIcon size={15} className="shrink-0 text-emerald-400" />
+              <span className="flex-1 text-sm text-fg">
+                Connected as <span className="font-medium">{oauthStatus.data?.github_user_login}</span>
+              </span>
+              <button
+                className="text-xs text-fg-muted hover:text-red-400"
+                onClick={() => disconnectGitHub.mutate()}
+                disabled={disconnectGitHub.isPending}
+              >
+                Disconnect
+              </button>
+            </div>
           )}
         </section>
 
-        {/* Connected repositories */}
-        <section>
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-muted">Connected repositories</p>
-          {(projectRepoQueries.data ?? []).filter((r) => r.is_active).map((repo) => (
-            <div key={repo.id} className="mb-1 flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-900 px-3 py-2">
-              <span className="min-w-0 flex-1 truncate text-sm text-fg">{repo.repo_full_name}</span>
-              <span className="text-[11px] text-fg-muted">→ {repo.project_name}</span>
-              <button className="text-fg-muted hover:text-red-400" onClick={() => disconnect(repo.id)} title="Disconnect">
-                <Trash2 size={13} />
-              </button>
-            </div>
-          ))}
-          {hasInstallation && (
-            <div className={cn('mt-2 space-y-2')}>
-              <div className="flex gap-2">
-                <input className="input-dark flex-1" placeholder="owner/repo" value={repoFullName} onChange={(e) => setRepoFullName(e.target.value)} />
-                <input className="input-dark !w-28" placeholder="Repo ID" value={repoId} onChange={(e) => setRepoId(e.target.value.replace(/\D/g, ''))} />
+        {/* Step 2 — Link a repository */}
+        {isConnected && (
+          <section>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-fg-muted">
+              Step 2 — Link a repository to a project
+            </p>
+
+            {/* Already connected repos */}
+            {activeRepos.length > 0 && (
+              <div className="mb-3 space-y-1">
+                {activeRepos.map((repo) => (
+                  <div key={repo.id} className="flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-900 px-3 py-2">
+                    <GitHubIcon size={13} className="shrink-0 text-fg-secondary" />
+                    <span className="min-w-0 flex-1 truncate text-sm text-fg">{repo.repo_full_name}</span>
+                    <span className="shrink-0 text-[11px] text-fg-muted">→ {repo.project_name}</span>
+                    <button
+                      className="text-fg-muted hover:text-red-400"
+                      onClick={() => void disconnectRepo(repo.id)}
+                      title="Disconnect"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))}
               </div>
+            )}
+
+            {/* Add a new repo */}
+            {repoOptions.length > 0 || availableRepos.isLoading ? (
               <div className="flex gap-2">
-                <select className="input-dark flex-1" value={repoProject} onChange={(e) => setRepoProject(e.target.value)}>
-                  {(projects.data ?? []).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      → {p.name}
+                <select
+                  className="input-dark flex-1"
+                  value={selectedRepo}
+                  onChange={(e) => setSelectedRepo(e.target.value)}
+                  disabled={availableRepos.isLoading}
+                >
+                  <option value="">{availableRepos.isLoading ? 'Loading repositories…' : 'Select a repository'}</option>
+                  {repoOptions.map((r) => (
+                    <option key={r.repo_id} value={r.repo_full_name}>
+                      {r.private ? '🔒 ' : ''}{r.repo_full_name}
                     </option>
+                  ))}
+                </select>
+                <select
+                  className="input-dark !w-44"
+                  value={selectedProject}
+                  onChange={(e) => setSelectedProject(e.target.value)}
+                >
+                  {(projects.data ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
                   ))}
                 </select>
                 <button
                   className="btn-primary !px-4 text-xs"
-                  disabled={!repoFullName.includes('/') || !repoId || connectRepo.isPending}
+                  disabled={!selectedRepo || connectRepo.isPending}
                   onClick={() => connectRepo.mutate()}
                 >
                   Connect
                 </button>
               </div>
-              <p className="text-[11px] text-fg-muted">
-                Repo ID is on the repository's API page: api.github.com/repos/owner/repo → "id".
-              </p>
-            </div>
-          )}
-        </section>
+            ) : (
+              !availableRepos.isLoading && (
+                <p className="text-xs text-fg-muted">
+                  All accessible repositories are already connected.
+                </p>
+              )
+            )}
+          </section>
+        )}
+
       </div>
     </Modal>
   )

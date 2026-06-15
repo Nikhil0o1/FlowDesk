@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from google.auth.transport import requests as google_requests
@@ -109,15 +109,24 @@ def rotate_refresh_token(
         raise AuthError("Invalid session")
 
     if record.revoked_at is not None:
-        # Token reuse: someone is replaying an already-rotated token. Kill the family.
-        db.execute(
-            update(RefreshToken)
-            .where(RefreshToken.family_id == record.family_id, RefreshToken.revoked_at.is_(None))
-            .values(revoked_at=_now())
+        # Two tabs (or a retried request) can legitimately replay a token that
+        # was rotated moments ago — that's a race, not an attack. Within a short
+        # grace window, rotate again off the same family instead of logging the
+        # user out everywhere.
+        is_recent_race = (
+            record.replaced_by_hash is not None
+            and record.revoked_at > _now() - timedelta(seconds=30)
         )
-        audit(db, "auth.refresh_token_reuse_detected", actor_id=record.user_id)
-        db.commit()
-        raise AuthError("Session expired, please sign in again")
+        if not is_recent_race:
+            # Genuine reuse of an old token: kill the whole family.
+            db.execute(
+                update(RefreshToken)
+                .where(RefreshToken.family_id == record.family_id, RefreshToken.revoked_at.is_(None))
+                .values(revoked_at=_now())
+            )
+            audit(db, "auth.refresh_token_reuse_detected", actor_id=record.user_id)
+            db.commit()
+            raise AuthError("Session expired, please sign in again")
 
     if record.expires_at <= _now():
         raise AuthError("Session expired, please sign in again")

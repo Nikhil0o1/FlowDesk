@@ -40,6 +40,7 @@ class GithubRepository(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     connected_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+    webhook_hook_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class GithubEvent(Base, UUIDPkMixin, TimestampMixin):
@@ -57,3 +58,19 @@ class GithubEvent(Base, UUIDPkMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), index=True
     )
     delivery_id: Mapped[str | None] = mapped_column(String(80), unique=True)
+
+
+class GithubOAuthToken(Base, UUIDPkMixin, TimestampMixin):
+    __tablename__ = "github_oauth_tokens"
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        unique=True, index=True, nullable=False
+    )
+    access_token: Mapped[str] = mapped_column(String(500), nullable=False)
+    scope: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    github_user_login: Mapped[str] = mapped_column(String(200), nullable=False)
+    github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    connected_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )

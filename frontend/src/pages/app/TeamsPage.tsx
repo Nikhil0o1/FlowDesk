@@ -17,9 +17,11 @@ import { CenteredSpinner } from '../../components/ui/Spinner'
 const TEAM_COLORS = ['#8C5BFF', '#4CB782', '#5B9FF0', '#F2994A', '#E667A8', '#26B5CE', '#E5484D']
 
 export default function TeamsPage() {
-  const { workspace } = useCurrentContext()
+  const { org, workspace } = useCurrentContext()
   const teams = useTeams(workspace?.id)
   const [params, setParams] = useSearchParams()
+  const canManage =
+    workspace?.my_role === 'admin' || workspace?.my_role === 'owner' || org?.my_role === 'owner'
 
   const tab = params.get('tab') === 'people' ? 'people' : 'teams'
   const selectedTeam = teams.data?.find((t) => t.id === params.get('team')) ?? null
@@ -44,15 +46,17 @@ export default function TeamsPage() {
               : 'Group people to assign and mention them as a unit.'}
           </p>
         </div>
-        <button
-          className="btn-primary"
-          onClick={() => {
-            params.set('new', '1')
-            setParams(params, { replace: true })
-          }}
-        >
-          <Plus size={15} /> Create Team
-        </button>
+        {canManage && (
+          <button
+            className="btn-primary"
+            onClick={() => {
+              params.set('new', '1')
+              setParams(params, { replace: true })
+            }}
+          >
+            <Plus size={15} /> Create Team
+          </button>
+        )}
       </div>
 
       <div className="mt-6">{tab === 'people' ? <PeopleList /> : <TeamsGrid teams={teams.data ?? []} />}</div>
@@ -109,36 +113,95 @@ function TeamsGrid({ teams }: { teams: Team[] }) {
 }
 
 function PeopleList() {
-  const { workspace } = useCurrentContext()
+  const { org, workspace } = useCurrentContext()
+  const queryClient = useQueryClient()
+  const user = useAuthStore((s) => s.user)
   const members = useWorkspaceMembers(workspace?.id)
+
+  const currentMemberRole = members.data?.find((member) => member.user_id === user?.id)?.role
+  const actorIsOwner = org?.my_role === 'owner' || workspace?.my_role === 'owner' || currentMemberRole === 'owner'
+  const actorIsAdmin = !actorIsOwner && (workspace?.my_role === 'admin' || currentMemberRole === 'admin')
+
+  const refreshPeople = () => {
+    void queryClient.invalidateQueries({ queryKey: ['workspace-members', workspace?.id] })
+    void queryClient.invalidateQueries({ queryKey: ['workspaces', org?.id] })
+    void queryClient.invalidateQueries({ queryKey: ['teams', workspace?.id] })
+  }
+
+  const changeWorkspaceRole = async (userId: string, role: 'admin' | 'member') => {
+    try {
+      await api.patch(`/workspaces/${workspace!.id}/members/${userId}`, { role })
+      toast.success(`Saved changes: user ${role === 'admin' ? 'promoted' : 'demoted'}`)
+      refreshPeople()
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  const removeWorkspaceMember = async (userId: string) => {
+    try {
+      await api.delete(`/workspaces/${workspace!.id}/members/${userId}`)
+      toast.success('Member removed')
+      refreshPeople()
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
 
   if (members.isLoading) return <CenteredSpinner />
   return (
     <div className="overflow-hidden rounded-xl border border-ink-700">
-      {(members.data ?? []).map((member) => (
-        <div key={member.id} className="flex items-center gap-3 border-b border-ink-700/60 bg-ink-900 px-4 py-3 last:border-b-0">
-          <Avatar
-            name={member.user?.full_name || member.user?.email || '?'}
-            src={member.user?.avatar_url}
-            size={34}
-            userId={member.user_id}
-            showPresence
-          />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-fg">{member.user?.full_name || member.user?.email}</p>
-            <p className="truncate text-xs text-fg-muted">{member.user?.email}</p>
-          </div>
-          <span className="text-[11px] text-fg-muted">joined {formatDate(member.created_at)}</span>
-          <span
-            className={cn(
-              'rounded px-2 py-0.5 text-[10px] font-semibold uppercase',
-              member.role === 'admin' ? 'bg-brand-soft text-brand' : 'bg-ink-750 text-fg-secondary',
+      {(members.data ?? []).map((member) => {
+        const canOwnerEdit = actorIsOwner && member.role !== 'owner' && member.user_id !== user?.id
+        const canAdminEdit = actorIsAdmin && member.role !== 'owner' && member.user_id !== user?.id
+        const canChangeRole = canOwnerEdit || canAdminEdit
+        const canRemove = canOwnerEdit || (actorIsAdmin && member.role === 'member' && member.user_id !== user?.id)
+        const nextRole = member.role === 'admin' ? 'member' : 'admin'
+        return (
+          <div key={member.id} className="flex items-center gap-3 border-b border-ink-700/60 bg-ink-900 px-4 py-3 last:border-b-0">
+            <Avatar
+              name={member.user?.full_name || member.user?.email || '?'}
+              src={member.user?.avatar_url}
+              size={34}
+              userId={member.user_id}
+              showPresence
+            />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-fg">{member.user?.full_name || member.user?.email}</p>
+              <p className="truncate text-xs text-fg-muted">{member.user?.email}</p>
+            </div>
+            <span className="text-[11px] text-fg-muted">joined {formatDate(member.created_at)}</span>
+            <span
+              className={cn(
+                'rounded px-2 py-0.5 text-[10px] font-semibold uppercase',
+                member.role === 'owner'
+                  ? 'bg-brand-soft text-brand'
+                  : member.role === 'admin'
+                    ? 'bg-purple-500/15 text-purple-300'
+                    : 'bg-ink-750 text-fg-secondary',
+              )}
+            >
+              {member.role}
+            </span>
+            {canChangeRole && (
+              <button
+                className="rounded-lg border border-ink-700 px-2.5 py-1 text-[11px] font-semibold text-fg-secondary transition-colors hover:border-brand hover:text-brand"
+                onClick={() => void changeWorkspaceRole(member.user_id, nextRole)}
+              >
+                {nextRole === 'admin' ? 'Promote to admin' : 'Demote to member'}
+              </button>
             )}
-          >
-            {member.role}
-          </span>
-        </div>
-      ))}
+            {canRemove && (
+              <button
+                className="rounded-lg border border-red-500/25 px-2.5 py-1 text-[11px] font-semibold text-red-300 transition-colors hover:border-red-400 hover:text-red-200"
+                onClick={() => void removeWorkspaceMember(member.user_id)}
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -232,7 +295,9 @@ function ManageTeamModal({ team, onClose }: { team: Team; onClose: () => void })
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ['teams', workspace?.id] })
-  const isManager = team.created_by === user?.id || workspace?.my_role === 'admin' || workspace?.my_role === 'owner'
+  const actorIsTeamOwner = team.my_role === 'owner'
+  const actorIsTeamAdmin = !actorIsTeamOwner && team.my_role === 'admin'
+  const canManageTeamMembers = actorIsTeamOwner || actorIsTeamAdmin
 
   const save = async () => {
     try {
@@ -254,6 +319,16 @@ function ManageTeamModal({ team, onClose }: { team: Team; onClose: () => void })
     }
   }
 
+  const changeRole = async (userId: string, role: 'admin' | 'member') => {
+    try {
+      await api.patch(`/teams/${team.id}/members/${userId}`, { role })
+      toast.success('Team role updated')
+      refresh()
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
   const remove = async () => {
     try {
       await api.delete(`/teams/${team.id}`)
@@ -266,11 +341,11 @@ function ManageTeamModal({ team, onClose }: { team: Team; onClose: () => void })
   }
 
   const memberIds = new Set(team.members.map((m) => m.id))
-
+  const memberRoleByUserId = new Map(team.member_details?.map((m) => [m.user_id, m.role]) ?? [])
   return (
     <Modal open onClose={onClose} title={team.name} width="max-w-lg">
       <div className="space-y-4">
-        {isManager && (
+        {canManageTeamMembers && (
           <div className="space-y-2.5">
             <input className="input-dark" value={name} onChange={(e) => setName(e.target.value)} />
             <textarea
@@ -295,9 +370,24 @@ function ManageTeamModal({ team, onClose }: { team: Team; onClose: () => void })
           <div className="max-h-64 space-y-0.5 overflow-y-auto">
             {(members.data ?? []).map((member) => {
               const isMember = memberIds.has(member.user_id)
-              const canToggle = isManager || member.user_id === user?.id
+              const teamRole = memberRoleByUserId.get(member.user_id)
+              const effectiveRole =
+                member.role === 'owner' || member.user_id === team.created_by
+                  ? 'owner'
+                  : member.role === 'admin' || teamRole === 'admin'
+                    ? 'admin'
+                    : teamRole
+              const canOwnerManage =
+                actorIsTeamOwner && isMember && effectiveRole !== 'owner' && member.user_id !== user?.id
+              const canAdminManage =
+                actorIsTeamAdmin && isMember && effectiveRole !== 'owner' && member.user_id !== user?.id
+              const canChangeRole = canOwnerManage || canAdminManage
+              const canRemoveMember =
+                canOwnerManage ||
+                (actorIsTeamAdmin && isMember && effectiveRole === 'member' && member.user_id !== user?.id)
+              const canAddMember = canManageTeamMembers && !isMember
               return (
-                <div key={member.user_id} className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-ink-800">
+                <div key={member.user_id} className="flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-ink-800">
                   <Avatar
                     name={member.user?.full_name || member.user?.email || '?'}
                     src={member.user?.avatar_url}
@@ -307,16 +397,41 @@ function ManageTeamModal({ team, onClose }: { team: Team; onClose: () => void })
                     {member.user?.full_name || member.user?.email}
                     {member.user_id === user?.id && <span className="text-fg-muted"> (you)</span>}
                   </span>
-                  {canToggle ? (
+                  {isMember && effectiveRole && (
+                    <span
+                      className={cn(
+                        'rounded px-2 py-0.5 text-[10px] font-semibold uppercase',
+                        effectiveRole === 'owner'
+                          ? 'bg-brand-soft text-brand'
+                          : effectiveRole === 'admin'
+                            ? 'bg-purple-500/15 text-purple-300'
+                            : 'bg-ink-750 text-fg-secondary',
+                      )}
+                    >
+                      {effectiveRole}
+                    </span>
+                  )}
+                  {canChangeRole && teamRole && (
+                    <button
+                      className="rounded-lg border border-ink-700 px-2 py-1 text-[11px] font-semibold text-fg-secondary transition-colors hover:border-brand hover:text-brand"
+                      onClick={() =>
+                        void changeRole(member.user_id, teamRole === 'admin' ? 'member' : 'admin')
+                      }
+                    >
+                      {teamRole === 'admin' ? 'Demote' : 'Promote'}
+                    </button>
+                  )}
+                  {canAddMember || canRemoveMember ? (
                     <button
                       onClick={() => toggleMember(member.user_id, isMember)}
                       className={cn(
-                        'flex h-5 w-5 items-center justify-center rounded border transition-colors',
-                        isMember ? 'border-brand bg-brand text-white' : 'border-ink-600 hover:border-fg-muted',
+                        'rounded-lg border px-2 py-1 text-[11px] font-semibold transition-colors',
+                        isMember
+                          ? 'border-red-500/30 text-red-300 hover:border-red-400 hover:text-red-200'
+                          : 'border-ink-700 text-fg-secondary hover:border-brand hover:text-brand',
                       )}
-                      title={isMember ? 'Remove from team' : 'Add to team'}
                     >
-                      {isMember ? <Check size={12} /> : <Plus size={11} className="text-fg-muted" />}
+                      {isMember ? 'Remove' : 'Add'}
                     </button>
                   ) : (
                     isMember && <Check size={14} className="text-brand" />
@@ -327,7 +442,7 @@ function ManageTeamModal({ team, onClose }: { team: Team; onClose: () => void })
           </div>
         </div>
 
-        {isManager && (
+        {actorIsTeamOwner && (
           <div className="border-t border-ink-700 pt-3">
             {confirmDelete ? (
               <div className="flex items-center justify-between text-sm">

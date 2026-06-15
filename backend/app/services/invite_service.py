@@ -20,6 +20,16 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Roles that may be granted per invite scope. Endpoint schemas validate this too;
+# kept here as defense in depth so no caller can mint e.g. an org owner via a
+# workspace-scoped invite.
+VALID_SCOPE_ROLES = {
+    "organization": ("owner", "member"),
+    "workspace": ("admin", "member"),
+    "project": ("admin", "member", "viewer"),
+}
+
+
 def _display_name(user: User) -> str:
     if user.profile and user.profile.full_name:
         return user.profile.full_name
@@ -38,6 +48,8 @@ def create_invite(
     project_id: uuid.UUID | None = None,
 ) -> Invite:
     """Create an invite and send the appropriate email (onboarding vs accept)."""
+    if role not in VALID_SCOPE_ROLES.get(scope, ()):
+        raise HTTPException(status_code=422, detail=f"Role '{role}' is not valid for {scope} invites")
     email = email.lower().strip()
     org = db.get(Organization, organization_id)
     if not org:
@@ -115,7 +127,9 @@ def create_invite(
         target_name = (
             project.name if project else workspace.name if workspace else org.name
         )
-        email_service.send_existing_user_invite_email(email, target_name, scope, inviter_name, raw_token)
+        email_service.send_existing_user_invite_email(
+            email, target_name, scope, inviter_name, raw_token, db=db, sender_id=inviter.id
+        )
         notify(
             db,
             existing_user.id,
@@ -127,14 +141,18 @@ def create_invite(
             project_id=project_id,
         )
     elif scope == "organization":
-        email_service.send_owner_onboarding_email(email, org.name, inviter_name, raw_token)
+        email_service.send_owner_onboarding_email(
+            email, org.name, inviter_name, raw_token, db=db, sender_id=inviter.id
+        )
     elif scope == "workspace":
         email_service.send_workspace_admin_onboarding_email(
-            email, workspace.name if workspace else "", org.name, inviter_name, raw_token
+            email, workspace.name if workspace else "", org.name, inviter_name, raw_token,
+            db=db, sender_id=inviter.id,
         )
     else:
         email_service.send_project_member_onboarding_email(
-            email, project.name if project else "", org.name, inviter_name, raw_token
+            email, project.name if project else "", org.name, inviter_name, raw_token,
+            db=db, sender_id=inviter.id,
         )
 
     db.commit()

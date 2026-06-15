@@ -28,14 +28,24 @@ REFRESH_COOKIE = "flowdesk_refresh"
 REFRESH_PATH = "/api/v1/auth"
 
 
+def _cross_site_cookie() -> bool:
+    """Deployed frontend (Vercel) and API (Render) are different sites, so the
+    refresh cookie must be SameSite=None; Secure — browsers silently drop a
+    Lax/insecure cookie on cross-site requests, which logs users out on every
+    page reload. Detect deployment from an https FRONTEND_URL as well, so a
+    missing ENVIRONMENT=production env var can't break sessions."""
+    return settings.ENVIRONMENT == "production" or settings.FRONTEND_URL.startswith("https://")
+
+
 def _set_refresh_cookie(response: Response, raw_token: str) -> None:
+    prod = _cross_site_cookie()
     response.set_cookie(
         REFRESH_COOKIE,
         raw_token,
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600,
         httponly=True,
-        secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
+        secure=prod,
+        samesite="none" if prod else "lax",
         path=REFRESH_PATH,
     )
 

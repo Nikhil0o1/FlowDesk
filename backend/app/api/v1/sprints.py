@@ -17,6 +17,7 @@ from app.schemas.common import Message, Page
 from app.schemas.sprint import (
     BurndownPoint,
     SprintBurndownOut,
+    SprintCompleteRequest,
     SprintCreate,
     SprintOut,
     SprintTaskAdd,
@@ -61,6 +62,23 @@ def _sprint_rooms(sprint: Sprint) -> list[str]:
     return rooms
 
 
+def _validate_scrum_master(db: Session, workspace_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """Scrum master is a per-sprint facilitation role: any member of the sprint's
+    workspace is eligible (it does NOT have to be an admin — that's the point:
+    it grants run rights for this one sprint without broader admin powers)."""
+    is_member = db.scalar(
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    )
+    if not is_member:
+        raise HTTPException(
+            status_code=422,
+            detail="Scrum master must be a member of this workspace",
+        )
+
+
 def _emit_sprint(sprint: Sprint, payload: dict | None = None) -> None:
     emit(
         "sprint.updated",
@@ -101,6 +119,8 @@ def create_sprint(
         perms.require_project_view(body.project_id)
     if body.start_date and body.end_date and body.end_date <= body.start_date:
         raise HTTPException(status_code=422, detail="End date must be after start date")
+    if body.scrum_master_id:
+        _validate_scrum_master(db, workspace_id, body.scrum_master_id)
     sprint = Sprint(
         workspace_id=workspace_id,
         project_id=body.project_id,
@@ -144,10 +164,17 @@ def update_sprint(
     if not sprint or sprint.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Sprint not found")
     perms.require_sprint_manager(sprint.workspace_id, sprint.scrum_master_id)
-    for field, value in body.model_dump(exclude_unset=True).items():
+    changes = body.model_dump(exclude_unset=True)
+    start = changes.get("start_date", sprint.start_date)
+    end = changes.get("end_date", sprint.end_date)
+    if start and end and end <= start:
+        raise HTTPException(status_code=422, detail="End date must be after start date")
+    if changes.get("scrum_master_id"):
+        _validate_scrum_master(db, sprint.workspace_id, changes["scrum_master_id"])
+    for field, value in changes.items():
         setattr(sprint, field, value)
-    _emit_sprint(sprint)
     db.commit()
+    _emit_sprint(sprint)
     return _sprint_out(db, sprint)
 
 
@@ -217,14 +244,15 @@ def start_sprint(
     log_activity(db, workspace_id=sprint.workspace_id, action="sprint.started",
                  actor_id=perms.user.id, project_id=sprint.project_id,
                  data={"sprint_id": str(sprint.id), "name": sprint.name})
-    _emit_sprint(sprint)
     db.commit()
+    _emit_sprint(sprint)
     return _sprint_out(db, sprint)
 
 
 @router.post("/sprints/{sprint_id}/complete", response_model=SprintOut)
 def complete_sprint(
     sprint_id: uuid.UUID,
+    body: SprintCompleteRequest | None = None,
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
@@ -234,6 +262,41 @@ def complete_sprint(
     perms.require_sprint_manager(sprint.workspace_id, sprint.scrum_master_id)
     if sprint.status != "active":
         raise HTTPException(status_code=409, detail="Only active sprints can be completed")
+
+    # Optional rollover: move unfinished tasks into another sprint (Jira-style)
+    moved = 0
+    if body and body.move_incomplete_to:
+        target = db.get(Sprint, body.move_incomplete_to)
+        if (
+            not target
+            or target.deleted_at is not None
+            or target.id == sprint.id
+            or target.workspace_id != sprint.workspace_id
+            or target.status == "completed"
+        ):
+            raise HTTPException(status_code=422, detail="Invalid sprint to move unfinished tasks to")
+        incomplete_links = db.scalars(
+            select(SprintTask)
+            .join(Task, Task.id == SprintTask.task_id)
+            .where(
+                SprintTask.sprint_id == sprint.id,
+                Task.completed_at.is_(None),
+                Task.deleted_at.is_(None),
+            )
+        ).all()
+        in_target = set(
+            db.scalars(select(SprintTask.task_id).where(SprintTask.sprint_id == target.id)).all()
+        )
+        for link in incomplete_links:
+            task = db.get(Task, link.task_id)
+            # Project-scoped target sprints only accept their own project's tasks
+            if target.project_id and task.project_id != target.project_id:
+                continue
+            db.delete(link)
+            if link.task_id not in in_target:
+                db.add(SprintTask(sprint_id=target.id, task_id=link.task_id, added_by=perms.user.id))
+            moved += 1
+
     sprint.status = "completed"
     sprint.completed_at = datetime.now(timezone.utc)
 
@@ -250,9 +313,12 @@ def complete_sprint(
         email_service.send_sprint_completed_email(user.email, sprint.name, completed, total, url)
     log_activity(db, workspace_id=sprint.workspace_id, action="sprint.completed",
                  actor_id=perms.user.id, project_id=sprint.project_id,
-                 data={"sprint_id": str(sprint.id), "completed_points": completed, "total_points": total})
-    _emit_sprint(sprint)
+                 data={"sprint_id": str(sprint.id), "completed_points": completed,
+                       "total_points": total, "tasks_moved": moved})
     db.commit()
+    if body and body.move_incomplete_to:
+        _emit_sprint(db.get(Sprint, body.move_incomplete_to), {"tasks_added": moved})
+    _emit_sprint(sprint)
     return _sprint_out(db, sprint)
 
 
@@ -306,14 +372,17 @@ def add_sprint_tasks(
         task = db.get(Task, task_id)
         if not task or task.deleted_at is not None:
             continue
+        # Project-scoped sprints only accept tasks from their own project
+        if sprint.project_id and task.project_id != sprint.project_id:
+            continue
         project = perms.get_project_or_404(task.project_id)
         if project.workspace_id != sprint.workspace_id:
             continue
         perms.require_project_edit(task.project_id)
         db.add(SprintTask(sprint_id=sprint_id, task_id=task_id, added_by=perms.user.id))
         added += 1
-    _emit_sprint(sprint, {"tasks_added": added})
     db.commit()
+    _emit_sprint(sprint, {"tasks_added": added})
     return Message(detail=f"{added} task(s) added to sprint")
 
 
@@ -335,10 +404,33 @@ def remove_sprint_task(
     )
     if not link:
         raise HTTPException(status_code=404, detail="Task is not in this sprint")
+    task = db.get(Task, task_id)
+    if task:
+        perms.require_project_edit(task.project_id)
     db.delete(link)
-    _emit_sprint(sprint, {"task_removed": str(task_id)})
     db.commit()
+    _emit_sprint(sprint, {"task_removed": str(task_id)})
     return Message(detail="Task removed from sprint")
+
+
+@router.get("/tasks/{task_id}/sprints", response_model=list[SprintOut])
+def task_sprints(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    perms: PermissionService = Depends(get_permissions),
+):
+    """Sprints this task belongs to (for the task detail sprint picker)."""
+    task = db.get(Task, task_id)
+    if not task or task.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    perms.require_project_view(task.project_id)
+    sprints = db.scalars(
+        select(Sprint)
+        .join(SprintTask, SprintTask.sprint_id == Sprint.id)
+        .where(SprintTask.task_id == task_id, Sprint.deleted_at.is_(None))
+        .order_by(Sprint.created_at.desc())
+    ).all()
+    return [_sprint_out(db, s) for s in sprints]
 
 
 @router.get("/sprints/{sprint_id}/burndown", response_model=SprintBurndownOut)
@@ -440,8 +532,8 @@ def submit_standup(
         )
         db.add(standup)
         db.flush()
-    _emit_sprint(sprint, {"standup_user_id": str(perms.user.id)})
     db.commit()
+    _emit_sprint(sprint, {"standup_user_id": str(perms.user.id)})
     out = StandupOut.model_validate(standup)
     out.user = user_briefs(db, [perms.user.id]).get(perms.user.id)
     return out

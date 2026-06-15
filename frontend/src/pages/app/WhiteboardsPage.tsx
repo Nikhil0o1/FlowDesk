@@ -7,6 +7,7 @@ import { api, errorMessage } from '../../lib/api'
 import { useCurrentContext, useWhiteboards } from '../../lib/queries'
 import type { Whiteboard } from '../../lib/types'
 import { timeAgo } from '../../lib/utils'
+import { useRealtime } from '../../lib/ws'
 import { useAuthStore } from '../../stores/auth'
 import { toast } from '../../stores/toast'
 import { Avatar } from '../../components/ui/Avatar'
@@ -25,6 +26,12 @@ export default function WhiteboardsPage() {
 
   const mineOnly = params.get('mine') === '1'
   const createOpen = params.get('new') === '1'
+
+  useRealtime(
+    ['whiteboard.created', 'whiteboard.updated', 'whiteboard.deleted'],
+    () => void queryClient.invalidateQueries({ queryKey: ['whiteboards', workspace?.id] }),
+    [workspace?.id],
+  )
 
   const visible = (boards.data ?? []).filter(
     (b) =>

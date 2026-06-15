@@ -20,6 +20,14 @@ class TeamUpdate(BaseModel):
     color: str | None = Field(default=None, max_length=20)
 
 
+class TeamMemberOut(ORMModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    role: str
+    created_at: datetime
+    user: UserBrief | None = None
+
+
 class TeamOut(ORMModel):
     id: uuid.UUID
     workspace_id: uuid.UUID
@@ -29,7 +37,15 @@ class TeamOut(ORMModel):
     created_by: uuid.UUID | None = None
     created_at: datetime
     members: list[UserBrief] = []
+    member_details: list[TeamMemberOut] = []
+    my_role: str | None = None
+    can_manage_members: bool = False
 
 
 class TeamMembersAdd(BaseModel):
     user_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    role: str = Field(default="member", pattern="^(admin|member)$")
+
+
+class TeamMemberRoleUpdate(BaseModel):
+    role: str = Field(pattern="^(admin|member)$")

@@ -14,6 +14,8 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { api, errorMessage } from '../../lib/api'
 import type { Whiteboard, WhiteboardElement } from '../../lib/types'
 import { cn } from '../../lib/utils'
+import { useRealtime } from '../../lib/ws'
+import { useAuthStore } from '../../stores/auth'
 import { toast } from '../../stores/toast'
 import { CenteredSpinner } from '../../components/ui/Spinner'
 
@@ -60,6 +62,28 @@ export default function WhiteboardCanvasPage() {
   useEffect(() => {
     if (elements) latest.current = elements
   }, [elements])
+
+  // Live updates from other users: refetch and swap in the remote scene,
+  // unless we have unsaved local edits (those would win on the next save).
+  const user = useAuthStore((s) => s.user)
+  const saveStateRef = useRef(saveState)
+  useEffect(() => {
+    saveStateRef.current = saveState
+  }, [saveState])
+  useRealtime(
+    'whiteboard.updated',
+    (event) => {
+      if (event.payload.whiteboard_id !== whiteboardId) return
+      if (event.payload.actor_id === user?.id) return
+      if (saveStateRef.current !== 'saved') return
+      void api.get<Whiteboard>(`/whiteboards/${whiteboardId}`).then((fresh) => {
+        queryClient.setQueryData(['whiteboard', whiteboardId], fresh)
+        setElements(fresh.content?.elements ?? [])
+        setName(fresh.name)
+      })
+    },
+    [whiteboardId, user?.id],
+  )
 
   const persist = useCallback(async () => {
     setSaveState('saving')

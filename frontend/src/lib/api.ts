@@ -1,7 +1,10 @@
 import { useAuthStore } from '../stores/auth'
 import type { TokenResponse } from './types'
 
-const BASE = '/api/v1'
+// Dev: same-origin '/api' (Vite proxies to :8000). Production (Vercel ↔ Render):
+// set VITE_API_URL to the API origin, e.g. https://flowdesk-api.onrender.com
+export const API_ORIGIN = ((import.meta.env.VITE_API_URL as string | undefined) ?? '').replace(/\/+$/, '')
+const BASE = `${API_ORIGIN}/api/v1`
 
 export class ApiError extends Error {
   status: number
@@ -13,23 +16,28 @@ export class ApiError extends Error {
   }
 }
 
-let refreshPromise: Promise<boolean> | null = null
+/** 'ok' = new access token; 'denied' = session truly invalid (401/403);
+ * 'error' = transient (network down, server cold-starting) — keep the session. */
+export type RefreshResult = 'ok' | 'denied' | 'error'
+
+let refreshPromise: Promise<RefreshResult> | null = null
 
 /** Rotate the refresh cookie into a new access token. Single-flight. */
-export async function tryRefresh(): Promise<boolean> {
+export async function tryRefresh(): Promise<RefreshResult> {
   if (!refreshPromise) {
-    refreshPromise = (async () => {
+    refreshPromise = (async (): Promise<RefreshResult> => {
       try {
         const res = await fetch(`${BASE}/auth/refresh`, {
           method: 'POST',
           credentials: 'include',
         })
-        if (!res.ok) return false
+        if (res.status === 401 || res.status === 403) return 'denied'
+        if (!res.ok) return 'error'
         const data = (await res.json()) as { access_token: string }
         useAuthStore.getState().setAccessToken(data.access_token)
-        return true
+        return 'ok'
       } catch {
-        return false
+        return 'error'
       } finally {
         // allow the next refresh attempt after this settles
         setTimeout(() => {
@@ -61,8 +69,10 @@ async function request<T>(
 
   if (res.status === 401 && opts.retry !== false) {
     const refreshed = await tryRefresh()
-    if (refreshed) return request<T>(method, path, body, { ...opts, retry: false })
-    useAuthStore.getState().clear()
+    if (refreshed === 'ok') return request<T>(method, path, body, { ...opts, retry: false })
+    // Only log out when the server explicitly rejected the session — a network
+    // blip or a cold-starting backend must not end the user's session.
+    if (refreshed === 'denied') useAuthStore.getState().clear()
   }
 
   if (!res.ok) {
@@ -127,10 +137,17 @@ export async function logout(): Promise<void> {
   }
 }
 
-/** On app boot: try cookie-based refresh, then load /auth/me. */
+/** On app boot: try cookie-based refresh, then load /auth/me.
+ * Retries transient failures so a cold-starting backend doesn't bounce a
+ * logged-in user to the login page. */
 export async function bootstrapSession(): Promise<boolean> {
-  const ok = await tryRefresh()
-  if (!ok) {
+  let result = await tryRefresh()
+  for (const delay of [1500, 4000]) {
+    if (result !== 'error') break
+    await new Promise((r) => setTimeout(r, delay))
+    result = await tryRefresh()
+  }
+  if (result !== 'ok') {
     useAuthStore.getState().setInitialized()
     return false
   }

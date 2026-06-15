@@ -69,6 +69,8 @@ class TaskOut(ORMModel):
     subtask_count: int = 0
     subtask_done_count: int = 0
     comment_count: int = 0
+    github_issue_number: int | None = None
+    github_issue_url: str | None = None
 
 
 class TaskDependencyOut(BaseModel):

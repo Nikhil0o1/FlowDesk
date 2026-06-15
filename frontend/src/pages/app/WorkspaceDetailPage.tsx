@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FolderKanban, Shield, Trash2, UserPlus, Users } from 'lucide-react'
+import { FolderKanban, Shield, UserPlus, Users } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
@@ -8,6 +8,7 @@ import { useCurrentContext, useProjects, useSpaces } from '../../lib/queries'
 import type { OrgMember, Workspace } from '../../lib/types'
 import { cn, formatDate } from '../../lib/utils'
 import { toast } from '../../stores/toast'
+import { useAuthStore } from '../../stores/auth'
 import { InviteModal } from '../../components/invites/InviteModal'
 import { Avatar } from '../../components/ui/Avatar'
 import { CenteredSpinner } from '../../components/ui/Spinner'
@@ -17,6 +18,7 @@ export default function WorkspaceDetailPage() {
   const { org } = useCurrentContext()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const user = useAuthStore((s) => s.user)
   const [inviteOpen, setInviteOpen] = useState(false)
 
   const workspace = useQuery({
@@ -38,13 +40,22 @@ export default function WorkspaceDetailPage() {
   if (!workspace.data) return <p className="p-8 text-sm text-fg-secondary">Workspace not found.</p>
 
   const ws = workspace.data
-  const isAdmin = ws.my_role === 'admin' || ws.my_role === 'owner' || org?.my_role === 'owner'
+  const currentMemberRole = members.data?.find((member) => member.user_id === user?.id)?.role
+  const actorIsOwner = org?.my_role === 'owner' || ws.my_role === 'owner' || currentMemberRole === 'owner'
+  const actorIsAdmin = !actorIsOwner && (ws.my_role === 'admin' || currentMemberRole === 'admin')
+  const isAdmin = actorIsOwner || actorIsAdmin
 
-  const changeRole = async (userId: string, role: string) => {
+  const refreshMembers = () => {
+    void queryClient.invalidateQueries({ queryKey: ['workspace-members', ws.id] })
+    void queryClient.invalidateQueries({ queryKey: ['workspace', ws.id] })
+    void queryClient.invalidateQueries({ queryKey: ['workspaces', org?.id] })
+  }
+
+  const changeRole = async (userId: string, role: 'admin' | 'member') => {
     try {
       await api.patch(`/workspaces/${ws.id}/members/${userId}`, { role })
-      void queryClient.invalidateQueries({ queryKey: ['workspace-members', ws.id] })
-      toast.success('Role updated')
+      refreshMembers()
+      toast.success(`Saved changes: user ${role === 'admin' ? 'promoted' : 'demoted'}`)
     } catch (err) {
       toast.error(errorMessage(err))
     }
@@ -53,7 +64,7 @@ export default function WorkspaceDetailPage() {
   const removeMember = async (userId: string) => {
     try {
       await api.delete(`/workspaces/${ws.id}/members/${userId}`)
-      void queryClient.invalidateQueries({ queryKey: ['workspace-members', ws.id] })
+      refreshMembers()
       toast.success('Member removed')
     } catch (err) {
       toast.error(errorMessage(err))
@@ -122,55 +133,64 @@ export default function WorkspaceDetailPage() {
             <span className="text-xs font-normal text-fg-muted">{members.data?.length ?? 0}</span>
           </h2>
           <div className="overflow-hidden rounded-xl border border-ink-700">
-            {(members.data ?? []).map((member) => (
-              <div
-                key={member.id}
-                className="group flex items-center gap-3 border-b border-ink-700/60 bg-ink-900 px-3.5 py-2.5 last:border-b-0"
-              >
-                <Avatar
-                  name={member.user?.full_name || member.user?.email || '?'}
-                  src={member.user?.avatar_url}
-                  size={30}
-                  userId={member.user_id}
-                  showPresence
-                />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-fg">
-                    {member.user?.full_name || member.user?.email}
-                  </p>
-                  <p className="truncate text-[11px] text-fg-muted">
-                    {member.user?.email} · joined {formatDate(member.created_at)}
-                  </p>
-                </div>
-                {isAdmin ? (
-                  <>
-                    <select
-                      value={member.role}
-                      onChange={(e) => changeRole(member.user_id, e.target.value)}
-                      className={cn(
-                        'rounded-lg border border-ink-700 bg-ink-800 px-2 py-1 text-[11px] text-fg-secondary outline-none',
-                        member.role === 'admin' && 'text-brand',
-                      )}
-                    >
-                      <option value="member">Member</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                    <button
-                      className="hidden text-fg-muted hover:text-red-400 group-hover:block"
-                      onClick={() => removeMember(member.user_id)}
-                      title="Remove from workspace"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </>
-                ) : (
-                  <span className="flex items-center gap-1 text-[11px] uppercase text-fg-muted">
-                    {member.role === 'admin' && <Shield size={11} className="text-brand" />}
+            {(members.data ?? []).map((member) => {
+              const canOwnerEdit = actorIsOwner && member.role !== 'owner' && member.user_id !== user?.id
+              const canAdminEdit = actorIsAdmin && member.role !== 'owner' && member.user_id !== user?.id
+              const canChangeRole = canOwnerEdit || canAdminEdit
+              const canRemove = canOwnerEdit || (actorIsAdmin && member.role === 'member' && member.user_id !== user?.id)
+              const nextRole = member.role === 'admin' ? 'member' : 'admin'
+              return (
+                <div
+                  key={member.id}
+                  className="group flex items-center gap-3 border-b border-ink-700/60 bg-ink-900 px-3.5 py-2.5 last:border-b-0"
+                >
+                  <Avatar
+                    name={member.user?.full_name || member.user?.email || '?'}
+                    src={member.user?.avatar_url}
+                    size={30}
+                    userId={member.user_id}
+                    showPresence
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-fg">
+                      {member.user?.full_name || member.user?.email}
+                    </p>
+                    <p className="truncate text-[11px] text-fg-muted">
+                      {member.user?.email} · joined {formatDate(member.created_at)}
+                    </p>
+                  </div>
+                  <span
+                    className={cn(
+                      'flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold uppercase',
+                      member.role === 'owner'
+                        ? 'bg-brand-soft text-brand'
+                        : member.role === 'admin'
+                          ? 'bg-purple-500/15 text-purple-300'
+                          : 'bg-ink-750 text-fg-secondary',
+                    )}
+                  >
+                    {member.role === 'admin' && <Shield size={11} />}
                     {member.role}
                   </span>
-                )}
-              </div>
-            ))}
+                  {canChangeRole && (
+                    <button
+                      className="rounded-lg border border-ink-700 px-2.5 py-1 text-[11px] font-semibold text-fg-secondary transition-colors hover:border-brand hover:text-brand"
+                      onClick={() => void changeRole(member.user_id, nextRole)}
+                    >
+                      {nextRole === 'admin' ? 'Promote to admin' : 'Demote to member'}
+                    </button>
+                  )}
+                  {canRemove && (
+                    <button
+                      className="rounded-lg border border-red-500/25 px-2.5 py-1 text-[11px] font-semibold text-red-300 transition-colors hover:border-red-400 hover:text-red-200"
+                      onClick={() => void removeMember(member.user_id)}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </section>
       </div>

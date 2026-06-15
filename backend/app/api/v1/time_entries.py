@@ -33,11 +33,16 @@ def _entry_out(db: Session, entry: TimeEntry, with_task: bool = False) -> TimeEn
     return out
 
 
-def _get_task_with_access(db: Session, perms: PermissionService, task_id: uuid.UUID) -> Task:
+def _get_task_with_access(
+    db: Session, perms: PermissionService, task_id: uuid.UUID, edit: bool = False
+) -> Task:
     task = db.get(Task, task_id)
     if not task or task.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Task not found")
-    perms.require_project_view(task.project_id)
+    if edit:
+        perms.require_project_edit(task.project_id)
+    else:
+        perms.require_project_view(task.project_id)
     return task
 
 
@@ -48,7 +53,7 @@ def start_timer(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    task = _get_task_with_access(db, perms, task_id)
+    task = _get_task_with_access(db, perms, task_id, edit=True)
     running = db.scalar(
         select(TimeEntry).where(
             TimeEntry.user_id == perms.user.id, TimeEntry.ended_at.is_(None)
@@ -121,7 +126,7 @@ def add_manual_entry(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    _get_task_with_access(db, perms, task_id)
+    _get_task_with_access(db, perms, task_id, edit=True)
     entry = TimeEntry(
         task_id=task_id,
         user_id=perms.user.id,

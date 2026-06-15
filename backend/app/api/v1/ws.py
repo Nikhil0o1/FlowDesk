@@ -39,12 +39,14 @@ def _resolve_rooms(user: User) -> tuple[list[str], list[str]]:
 async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
     payload = decode_access_token(token)
     if payload is None:
+        await ws.accept()
         await ws.close(code=4401, reason="Invalid token")
         return
     db = SessionLocal()
     try:
         user = db.get(User, uuid.UUID(payload["sub"]))
         if not user or not user.is_active or user.deleted_at is not None:
+            await ws.accept()
             await ws.close(code=4401, reason="Account inactive")
             return
     finally:

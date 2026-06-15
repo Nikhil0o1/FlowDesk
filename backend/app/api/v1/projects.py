@@ -152,7 +152,7 @@ def list_projects(
 ):
     ws = perms.require_workspace_member(workspace_id)
     is_admin = (
-        perms.workspace_role(workspace_id) == "admin"
+        perms.workspace_role(workspace_id) in ("admin", "owner")
         or perms.org_role(ws.organization_id) == "owner"
     )
     query = select(Project).where(

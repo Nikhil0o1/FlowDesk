@@ -135,7 +135,7 @@ class PermissionService:
         self.require_org_member(ws.organization_id)
         if self.org_role(ws.organization_id) == "owner":
             return ws
-        if self.workspace_role(workspace_id) != "admin":
+        if self.workspace_role(workspace_id) not in ("admin", "owner"):
             raise PermissionError403("Workspace admin access required")
         return ws
 
@@ -160,7 +160,7 @@ class PermissionService:
         self.require_org_member(ws.organization_id)
         if self.org_role(ws.organization_id) == "owner":
             return project
-        if self.workspace_role(project.workspace_id) == "admin":
+        if self.workspace_role(project.workspace_id) in ("admin", "owner"):
             return project
         if self.project_role(project_id) is None:
             raise NotFound404("Project not found")
@@ -173,7 +173,7 @@ class PermissionService:
         if role == "viewer":
             ws_role = self.workspace_role(project.workspace_id)
             ws = self.get_workspace_or_404(project.workspace_id)
-            if ws_role != "admin" and self.org_role(ws.organization_id) != "owner":
+            if ws_role not in ("admin", "owner") and self.org_role(ws.organization_id) != "owner":
                 raise PermissionError403("You have view-only access to this project")
         return project
 
@@ -184,7 +184,7 @@ class PermissionService:
         self.require_org_member(ws.organization_id)
         if self.org_role(ws.organization_id) == "owner":
             return project
-        if self.workspace_role(project.workspace_id) == "admin":
+        if self.workspace_role(project.workspace_id) in ("admin", "owner"):
             return project
         if self.project_role(project_id) != "admin":
             raise PermissionError403("Project admin access required")

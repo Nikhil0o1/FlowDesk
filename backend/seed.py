@@ -60,6 +60,11 @@ def main() -> None:
             db, settings.SUPERADMIN_EMAIL, "Platform Admin",
             settings.SUPERADMIN_PASSWORD, "Platform Administrator", superadmin=True,
         )
+        # Keep the bootstrap account in sync with .env even if it already exists
+        # (get_or_create_user never touches existing rows).
+        superadmin.hashed_password = hash_password(settings.SUPERADMIN_PASSWORD)
+        superadmin.is_platform_superadmin = True
+        superadmin.is_active = True
 
         # ---- Demo organization ----
         org = db.scalar(select(Organization).where(Organization.slug == "acme"))

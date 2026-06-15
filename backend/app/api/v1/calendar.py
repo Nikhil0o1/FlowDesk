@@ -26,11 +26,14 @@ from app.schemas.common import Message
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
+from app.services import google_service
+
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
-GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar.readonly email"
+# One consent covers Calendar, Gmail and Sheets (see google_service)
+GOOGLE_SCOPE = google_service.ALL_SCOPES
 
 
 def _google_configured() -> bool:
@@ -41,11 +44,12 @@ def _redirect_uri() -> str:
     return f"{settings.BACKEND_URL}/api/v1/calendar/google/callback"
 
 
-def _state_token(user_id: uuid.UUID) -> str:
+def _state_token(user_id: uuid.UUID, next_page: str = "planner") -> str:
     return jwt.encode(
         {
             "sub": str(user_id),
             "purpose": "gcal",
+            "next": next_page,
             "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
             "nonce": secrets.token_hex(8),
         },
@@ -54,14 +58,15 @@ def _state_token(user_id: uuid.UUID) -> str:
     )
 
 
-def _verify_state(state: str) -> uuid.UUID:
+def _verify_state(state: str) -> tuple[uuid.UUID, str]:
     try:
         payload = jwt.decode(state, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
     except jwt.PyJWTError:
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
     if payload.get("purpose") != "gcal":
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
-    return uuid.UUID(payload["sub"])
+    next_page = payload.get("next") if payload.get("next") in ("planner", "apps") else "planner"
+    return uuid.UUID(payload["sub"]), next_page
 
 
 class ProviderStatus(BaseModel):
@@ -102,11 +107,11 @@ def calendar_status(db: Session = Depends(get_db), user: User = Depends(get_curr
 
 
 @router.get("/google/auth-url")
-def google_auth_url(user: User = Depends(get_current_user)):
+def google_auth_url(next: str = Query(default="planner"), user: User = Depends(get_current_user)):
     if not _google_configured():
         raise HTTPException(
             status_code=503,
-            detail="Google Calendar is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the root .env.",
+            detail="Google integration is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the root .env.",
         )
     from urllib.parse import urlencode
 
@@ -118,7 +123,7 @@ def google_auth_url(user: User = Depends(get_current_user)):
             "scope": GOOGLE_SCOPE,
             "access_type": "offline",
             "prompt": "consent",
-            "state": _state_token(user.id),
+            "state": _state_token(user.id, next),
         }
     )
     return {"url": f"{GOOGLE_AUTH_URL}?{params}"}
@@ -134,7 +139,7 @@ def google_callback(
     fail = RedirectResponse(f"{settings.FRONTEND_URL}/app/planner?calendar_error=1")
     if error or not code:
         return fail
-    user_id = _verify_state(state)
+    user_id, next_page = _verify_state(state)
 
     token_res = http.post(
         GOOGLE_TOKEN_URL,
@@ -189,41 +194,22 @@ def google_callback(
             )
         )
     db.commit()
-    return RedirectResponse(f"{settings.FRONTEND_URL}/app/planner?connected=google")
+    return RedirectResponse(f"{settings.FRONTEND_URL}/app/{next_page}?connected=google")
 
 
 def _fresh_access_token(db: Session, connection: CalendarConnection) -> str:
-    """Refresh the access token if it expires within 2 minutes."""
-    now = datetime.now(timezone.utc)
-    if connection.token_expiry and connection.token_expiry > now + timedelta(minutes=2):
-        return connection.access_token
-    if not connection.refresh_token:
-        raise HTTPException(status_code=401, detail="Google connection expired — reconnect your calendar")
-    res = http.post(
-        GOOGLE_TOKEN_URL,
-        data={
-            "client_id": settings.GOOGLE_CLIENT_ID,
-            "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "refresh_token": connection.refresh_token,
-            "grant_type": "refresh_token",
-        },
-        timeout=15,
-    )
-    if not res.ok:
-        raise HTTPException(status_code=401, detail="Google connection expired — reconnect your calendar")
-    tokens = res.json()
-    connection.access_token = tokens["access_token"]
-    connection.token_expiry = now + timedelta(seconds=int(tokens.get("expires_in", 3600)))
-    db.commit()
-    return connection.access_token
+    return google_service.fresh_access_token(db, connection)
 
 
 @router.get("/events", response_model=list[CalendarEvent])
 def upcoming_events(
     days: int = Query(7, ge=1, le=31),
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Events between start/end (e.g. the Planner's visible week); falls back to now+days."""
     connection = db.scalar(
         select(CalendarConnection).where(
             CalendarConnection.user_id == user.id, CalendarConnection.provider == "google"
@@ -234,15 +220,21 @@ def upcoming_events(
     token = _fresh_access_token(db, connection)
 
     now = datetime.now(timezone.utc)
+    time_min = start or now
+    time_max = end or (now + timedelta(days=days))
+    if time_min.tzinfo is None:
+        time_min = time_min.replace(tzinfo=timezone.utc)
+    if time_max.tzinfo is None:
+        time_max = time_max.replace(tzinfo=timezone.utc)
     res = http.get(
         GOOGLE_EVENTS_URL,
         headers={"Authorization": f"Bearer {token}"},
         params={
-            "timeMin": now.isoformat(),
-            "timeMax": (now + timedelta(days=days)).isoformat(),
+            "timeMin": time_min.isoformat(),
+            "timeMax": time_max.isoformat(),
             "singleEvents": "true",
             "orderBy": "startTime",
-            "maxResults": 25,
+            "maxResults": 100,
         },
         timeout=15,
     )
@@ -264,6 +256,47 @@ def upcoming_events(
             )
         )
     return events
+
+
+class EventCreate(BaseModel):
+    summary: str
+    description: str | None = None
+    start_at: datetime
+    end_at: datetime
+
+
+@router.post("/events", response_model=CalendarEvent, status_code=201)
+def create_event(
+    body: EventCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Time-block: create an event on the user's primary Google Calendar."""
+    from app.services import google_service as gs
+
+    connection = db.scalar(
+        select(CalendarConnection).where(
+            CalendarConnection.user_id == user.id, CalendarConnection.provider == "google"
+        )
+    )
+    if not gs.has_scope(connection, gs.SCOPE_CALENDAR):
+        raise HTTPException(
+            status_code=412,
+            detail="Re-connect your Google account in the App Center to allow calendar write access",
+        )
+    if body.end_at <= body.start_at:
+        raise HTTPException(status_code=422, detail="End time must be after start time")
+    summary = body.summary.strip()
+    if not summary:
+        raise HTTPException(status_code=422, detail="Event title is required")
+    link = gs.calendar_create_timed_event(
+        db, connection, summary=summary, description=body.description or "",
+        start_at=body.start_at, end_at=body.end_at,
+    )
+    return CalendarEvent(
+        id="", summary=summary, start=body.start_at.isoformat(),
+        end=body.end_at.isoformat(), all_day=False, link=link or None,
+    )
 
 
 @router.delete("/google", response_model=Message)

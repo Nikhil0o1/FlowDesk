@@ -56,10 +56,21 @@ def _accept_url(token: str) -> str:
     return f"{settings.FRONTEND_URL}/activate-invite?token={token}&existing=1"
 
 
+def _send_invite(to: str, subject: str, html: str, db=None, sender_id=None) -> None:
+    """Invite emails go out from the inviter's own Gmail when they've connected
+    it with the gmail.send scope; otherwise (or on any failure) via SMTP."""
+    if db is not None and sender_id is not None:
+        from app.services import google_service
+
+        if google_service.try_gmail_send(db, sender_id, to, subject, html):
+            return
+    send_email_async(to, subject, html)
+
+
 # ---------- 1-3. Onboarding emails (new users) ----------
 
-def send_owner_onboarding_email(to: str, org_name: str, inviter_name: str, token: str) -> None:
-    send_email_async(
+def send_owner_onboarding_email(to: str, org_name: str, inviter_name: str, token: str, db=None, sender_id=None) -> None:
+    _send_invite(
         to,
         f"You've been invited to own {org_name} on {BRAND}",
         _layout(
@@ -71,11 +82,13 @@ def send_owner_onboarding_email(to: str, org_name: str, inviter_name: str, token
             "Activate your account",
             _activate_url(token),
         ),
+        db=db,
+        sender_id=sender_id,
     )
 
 
-def send_workspace_admin_onboarding_email(to: str, workspace_name: str, org_name: str, inviter_name: str, token: str) -> None:
-    send_email_async(
+def send_workspace_admin_onboarding_email(to: str, workspace_name: str, org_name: str, inviter_name: str, token: str, db=None, sender_id=None) -> None:
+    _send_invite(
         to,
         f"{inviter_name} invited you to manage {workspace_name}",
         _layout(
@@ -87,11 +100,13 @@ def send_workspace_admin_onboarding_email(to: str, workspace_name: str, org_name
             "Activate your account",
             _activate_url(token),
         ),
+        db=db,
+        sender_id=sender_id,
     )
 
 
-def send_project_member_onboarding_email(to: str, project_name: str, org_name: str, inviter_name: str, token: str) -> None:
-    send_email_async(
+def send_project_member_onboarding_email(to: str, project_name: str, org_name: str, inviter_name: str, token: str, db=None, sender_id=None) -> None:
+    _send_invite(
         to,
         f"{inviter_name} invited you to {project_name}",
         _layout(
@@ -102,13 +117,15 @@ def send_project_member_onboarding_email(to: str, project_name: str, org_name: s
             "Join the project",
             _activate_url(token),
         ),
+        db=db,
+        sender_id=sender_id,
     )
 
 
 # ---------- 4. Existing user invited ----------
 
-def send_existing_user_invite_email(to: str, target_name: str, scope: str, inviter_name: str, token: str) -> None:
-    send_email_async(
+def send_existing_user_invite_email(to: str, target_name: str, scope: str, inviter_name: str, token: str, db=None, sender_id=None) -> None:
+    _send_invite(
         to,
         f"{inviter_name} added you to {target_name}",
         _layout(
@@ -118,6 +135,8 @@ def send_existing_user_invite_email(to: str, target_name: str, scope: str, invit
             "Accept invitation",
             _accept_url(token),
         ),
+        db=db,
+        sender_id=sender_id,
     )
 
 

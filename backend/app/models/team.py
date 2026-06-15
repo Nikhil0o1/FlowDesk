@@ -6,6 +6,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPkMixin
 
+TEAM_ROLES = ("admin", "member")
+
 
 class Team(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     """A named group of people inside a workspace (assign/mention as a unit)."""
@@ -33,3 +35,4 @@ class TeamMember(Base, UUIDPkMixin, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    role: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # admin | member

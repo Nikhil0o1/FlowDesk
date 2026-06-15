@@ -170,6 +170,8 @@ export interface Task {
   subtask_count: number
   subtask_done_count: number
   comment_count: number
+  github_issue_number: number | null
+  github_issue_url: string | null
 }
 
 export interface TaskDependency {
@@ -335,6 +337,13 @@ export interface InvitePreview {
   expired: boolean
 }
 
+export interface InviteContext {
+  scope: 'organization' | 'workspace' | 'project'
+  organization_id: string
+  workspace_id: string | null
+  project_id: string | null
+}
+
 export interface Activity {
   id: string
   workspace_id: string
@@ -397,6 +406,14 @@ export interface AuditLog {
   actor: UserBrief | null
 }
 
+export interface TeamMember {
+  id: string
+  user_id: string
+  role: 'admin' | 'member'
+  created_at: string
+  user: UserBrief | null
+}
+
 export interface Team {
   id: string
   workspace_id: string
@@ -406,6 +423,9 @@ export interface Team {
   created_by: string | null
   created_at: string
   members: UserBrief[]
+  member_details: TeamMember[]
+  my_role: 'owner' | 'admin' | 'member' | null
+  can_manage_members: boolean
 }
 
 export interface WhiteboardElement {

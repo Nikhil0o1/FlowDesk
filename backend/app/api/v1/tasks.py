@@ -233,11 +233,14 @@ def create_task(
     )
     db.add(task)
     db.flush()
+    assigned: list[uuid.UUID] = []
     if body.assignee_ids:
-        task_service.assign_users(db, task, project, body.assignee_ids, perms.user)
+        assigned = task_service.assign_users(db, task, project, body.assignee_ids, perms.user)
     task_service.log_task_activity(db, project, task, "task.created", perms.user.id)
-    task_service.emit_task_event("task.created", db, project, task)
     db.commit()
+    task_service.emit_task_event("task.created", db, project, task)
+    if assigned:
+        task_service.emit_assigned(project, task, assigned, perms.user)
     return task_service.build_task_outs(db, project, [task])[0]
 
 
@@ -339,6 +342,8 @@ def update_task(
         status_changed = task_service.apply_status_change(db, task, changes["status_id"])
         if status_changed:
             changed_fields.append("status_id")
+            # Close / reopen the linked GitHub issue when the task moves to/from done
+            _sync_github_issue_state(db, task, status)
         changes.pop("status_id")
 
     if changes.pop("clear_priority", False):
@@ -361,11 +366,11 @@ def update_task(
             "task.status_changed" if status_changed and changed_fields == ["status_id"] else "task.updated",
             perms.user.id, {"fields": changed_fields},
         )
+        db.commit()
         task_service.emit_task_event(
             "task.updated", db, project, task,
             {"fields": changed_fields, "status_id": str(task.status_id) if task.status_id else None},
         )
-        db.commit()
     return task_service.build_task_outs(db, project, [task])[0]
 
 
@@ -381,8 +386,8 @@ def delete_task(
     project = perms.require_project_edit(task.project_id)
     task.deleted_at = datetime.now(timezone.utc)
     task_service.log_task_activity(db, project, task, "task.deleted", perms.user.id)
-    task_service.emit_task_event("task.deleted", db, project, task)
     db.commit()
+    task_service.emit_task_event("task.deleted", db, project, task)
     return Message(detail="Task deleted")
 
 
@@ -404,6 +409,8 @@ def add_assignees(
             {"user_ids": [str(u) for u in added]},
         )
     db.commit()
+    if added:
+        task_service.emit_assigned(project, task, added, perms.user)
     return Message(detail=f"{len(added)} assignee(s) added")
 
 
@@ -427,8 +434,8 @@ def remove_assignee(
     task_service.log_task_activity(
         db, project, task, "task.unassigned", perms.user.id, {"user_id": str(user_id)}
     )
-    task_service.emit_task_event("task.updated", db, project, task, {"fields": ["assignees"]})
     db.commit()
+    task_service.emit_task_event("task.updated", db, project, task, {"fields": ["assignees"]})
     return Message(detail="Assignee removed")
 
 
@@ -469,8 +476,8 @@ def add_dependency(
         db, project, task, "task.dependency_added", perms.user.id,
         {"depends_on": str(body.depends_on_task_id)},
     )
-    task_service.emit_task_event("task.updated", db, project, task, {"fields": ["dependencies"]})
     db.commit()
+    task_service.emit_task_event("task.updated", db, project, task, {"fields": ["dependencies"]})
     return Message(detail="Dependency added")
 
 
@@ -489,8 +496,8 @@ def remove_dependency(
     if not dep or dep.task_id != task_id:
         raise HTTPException(status_code=404, detail="Dependency not found")
     db.delete(dep)
-    task_service.emit_task_event("task.updated", db, project, task, {"fields": ["dependencies"]})
     db.commit()
+    task_service.emit_task_event("task.updated", db, project, task, {"fields": ["dependencies"]})
     return Message(detail="Dependency removed")
 
 
@@ -549,3 +556,51 @@ def delete_recurring(
     rec.is_active = False
     db.commit()
     return Message(detail="Recurring task disabled")
+
+
+# ---------------------------------------------------------------------------
+# GitHub issue state sync
+# ---------------------------------------------------------------------------
+
+def _sync_github_issue_state(db: Session, task: Task, new_status: CustomStatus | None) -> None:
+    """Close or reopen the linked GitHub issue when the task moves to/from a done status."""
+    if not task.github_issue_number:
+        return
+    from app.models.github import GithubInstallation, GithubOAuthToken, GithubRepository
+    from app.services import github_api_service
+    from sqlalchemy import select as sa_select
+
+    repo = db.scalar(
+        sa_select(GithubRepository).where(
+            GithubRepository.project_id == task.project_id,
+            GithubRepository.is_active.is_(True),
+            GithubRepository.deleted_at.is_(None),
+        )
+    )
+    if not repo:
+        return
+    installation = db.get(GithubInstallation, repo.installation_id)
+    if not installation:
+        return
+    token_row = db.scalar(
+        sa_select(GithubOAuthToken).where(GithubOAuthToken.organization_id == installation.organization_id)
+    )
+    if not token_row:
+        return
+
+    owner, repo_name = repo.repo_full_name.split("/", 1)
+    state = "closed" if (new_status and new_status.category == "done") else "open"
+    try:
+        import requests as http_requests
+        http_requests.patch(
+            f"https://api.github.com/repos/{owner}/{repo_name}/issues/{task.github_issue_number}",
+            headers={
+                "Authorization": f"Bearer {token_row.access_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"state": state},
+            timeout=10,
+        )
+    except Exception:
+        pass

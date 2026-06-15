@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 
 import { useAuthStore } from '../stores/auth'
+import { API_ORIGIN, tryRefresh } from './api'
 
 export interface RealtimeEvent {
   type: string
@@ -60,9 +61,16 @@ class RealtimeClient {
 
   private connect() {
     const token = useAuthStore.getState().accessToken
-    if (!token || !this.shouldRun) return
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${protocol}://${window.location.host}/api/v1/ws?token=${token}`)
+    if (!this.shouldRun) return
+    if (!token) {
+      // Token not in memory yet (or refresh in flight) — retry shortly
+      setTimeout(() => this.connect(), this.reconnectDelay)
+      return
+    }
+    // Connect to VITE_API_URL when set (Vercel ↔ Render), else same origin (dev proxy)
+    const httpBase =
+      API_ORIGIN || `${window.location.protocol === 'https:' ? 'https' : 'http'}://${window.location.host}`
+    const ws = new WebSocket(`${httpBase.replace(/^http/, 'ws')}/api/v1/ws?token=${token}`)
     this.ws = ws
 
     ws.onopen = () => {
@@ -90,11 +98,28 @@ class RealtimeClient {
       this.dispatch(event)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       if (this.pingInterval) window.clearInterval(this.pingInterval)
       if (!this.shouldRun) return
-      setTimeout(() => this.connect(), this.reconnectDelay)
+      const delay = this.reconnectDelay
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 15000)
+      setTimeout(() => {
+        // 4401 = server explicitly closed with expired-token reason.
+        // 1006 = abnormal close, which is what browsers report when the server
+        // rejects the WebSocket upgrade with HTTP 403 (token expired at connect
+        // time). Both cases need a token refresh before reconnecting.
+        if (e.code === 4401 || e.code === 1006) {
+          void tryRefresh().then((result) => {
+            if (result === 'denied') {
+              useAuthStore.getState().clear()
+            } else {
+              this.connect()
+            }
+          })
+        } else {
+          this.connect()
+        }
+      }, delay)
     }
   }
 

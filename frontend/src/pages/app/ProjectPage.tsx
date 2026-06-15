@@ -1,10 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  ArrowLeftRight,
   Calendar as CalendarIcon,
   Check,
   CheckCircle2,
+  Clock4,
   Columns3,
+  ExternalLink,
+  FileSpreadsheet,
   GanttChart,
   GitBranch,
   Layers,
@@ -22,7 +26,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
-import { useProject, useProjectTasks, useSpaces, useStatuses } from '../../lib/queries'
+import { useCurrentContext, useProject, useProjectTasks, useSpaces, useStatuses } from '../../lib/queries'
 import { recordRecent } from '../../lib/recents'
 import type { OrgMember, Priority, Task, TaskType } from '../../lib/types'
 import { cn } from '../../lib/utils'
@@ -30,7 +34,9 @@ import { useRealtime } from '../../lib/ws'
 import { useAuthStore } from '../../stores/auth'
 import { toast } from '../../stores/toast'
 import { GithubFeed } from '../../components/github/GithubFeed'
+import { InviteModal } from '../../components/invites/InviteModal'
 import { ProjectActivity } from '../../components/projects/ProjectActivity'
+import { ProjectMembersModal } from '../../components/projects/ProjectMembersModal'
 import { CalendarView } from '../../components/tasks/CalendarView'
 import { GanttView } from '../../components/tasks/GanttView'
 import { KanbanBoard } from '../../components/tasks/KanbanBoard'
@@ -63,6 +69,9 @@ export default function ProjectPage() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
+  const { org, workspace } = useCurrentContext()
+  const canManageWorkspace =
+    workspace?.my_role === 'admin' || workspace?.my_role === 'owner' || org?.my_role === 'owner'
 
   const project = useProject(projectId)
   const statuses = useStatuses(projectId)
@@ -84,6 +93,8 @@ export default function ProjectPage() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [q, setQ] = useState('')
   const [addTaskOpen, setAddTaskOpen] = useState(false)
+  const [membersOpen, setMembersOpen] = useState(false)
+  const [inviteOpen, setInviteOpen] = useState(false)
 
   const filterParams = useMemo(() => {
     let s = ''
@@ -167,12 +178,22 @@ export default function ProjectPage() {
 
         <div className="mt-2 flex items-center">
           <button
-            onClick={() => navigate('/app/chat?new=1')}
-            className="mr-2 rounded-lg border border-ink-700 px-2.5 py-1 text-xs font-medium text-fg-secondary transition-colors hover:bg-ink-800 hover:text-fg"
+            onClick={() => setMembersOpen(true)}
+            className="mr-2 flex items-center gap-1.5 rounded-lg border border-ink-700 px-2.5 py-1 text-xs font-medium text-fg-secondary transition-colors hover:bg-ink-800 hover:text-fg"
           >
-            Add Channel
+            <UserRound size={13} /> Members
           </button>
-          <span className="mr-1 h-4 w-px bg-ink-700" />
+          {canManageWorkspace && (
+            <>
+              <button
+                onClick={() => navigate('/app/chat?new=1')}
+                className="mr-2 rounded-lg border border-ink-700 px-2.5 py-1 text-xs font-medium text-fg-secondary transition-colors hover:bg-ink-800 hover:text-fg"
+              >
+                Add Channel
+              </button>
+              <span className="mr-1 h-4 w-px bg-ink-700" />
+            </>
+          )}
           {VIEW_TABS.map((tab) => (
             <button
               key={tab.key}
@@ -428,6 +449,9 @@ export default function ProjectPage() {
             </button>
           )}
 
+          {/* Google Sheets */}
+          <SheetsMenu projectId={proj.id} isAdmin={proj.my_role === 'admin' || canManageWorkspace} />
+
           {/* Add Task */}
           {canEdit && (
             <button
@@ -471,7 +495,193 @@ export default function ProjectPage() {
       </div>
 
       <AddTaskModal projectId={proj.id} open={addTaskOpen} onClose={() => setAddTaskOpen(false)} />
+      <ProjectMembersModal
+        open={membersOpen}
+        onClose={() => setMembersOpen(false)}
+        projectId={proj.id}
+        workspaceId={proj.workspace_id}
+        canManage={proj.my_role === 'admin' || canManageWorkspace}
+        onInviteByEmail={() => {
+          setMembersOpen(false)
+          setInviteOpen(true)
+        }}
+      />
+      <InviteModal
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        defaultScope="project"
+        defaultWorkspaceId={proj.workspace_id}
+        defaultProjectId={proj.id}
+      />
     </div>
+  )
+}
+
+interface SheetSyncStatus {
+  enabled: boolean
+  mode: 'export' | 'two_way' | null
+  url: string | null
+  last_synced_at: string | null
+}
+
+/** Export the project to Google Sheets, keep a sheet in sync (one-way mirror
+ * or two-way: sheet edits and new rows flow back), or export a time report. */
+function SheetsMenu({ projectId, isAdmin }: { projectId: string; isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const [exporting, setExporting] = useState(false)
+
+  const sync = useQuery({
+    queryKey: ['sheet-sync', projectId],
+    queryFn: () => api.get<SheetSyncStatus>(`/projects/${projectId}/sheets/sync`),
+  })
+
+  const exportNow = async () => {
+    setExporting(true)
+    try {
+      const { url } = await api.post<{ url: string }>(`/projects/${projectId}/sheets/export`)
+      toast.success('Exported to Google Sheets')
+      window.open(url, '_blank', 'noreferrer')
+    } catch (err) {
+      toast.error(errorMessage(err))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const exportTimeReport = async () => {
+    setExporting(true)
+    try {
+      const { url } = await api.post<{ url: string }>(`/projects/${projectId}/sheets/time-report`)
+      toast.success('Time report exported — Entries + Summary tabs')
+      window.open(url, '_blank', 'noreferrer')
+    } catch (err) {
+      toast.error(errorMessage(err))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const toggleSync = async (enabled: boolean, mode: 'export' | 'two_way' = 'export') => {
+    try {
+      const status = await api.post<SheetSyncStatus>(`/projects/${projectId}/sheets/sync`, { enabled, mode })
+      toast.success(
+        !enabled
+          ? 'Live sync disabled'
+          : mode === 'two_way'
+            ? 'Two-way sync enabled — sheet edits and new rows flow back into FlowDesk'
+            : 'Live sync enabled — sheet updates every 10 minutes',
+      )
+      void queryClient.invalidateQueries({ queryKey: ['sheet-sync', projectId] })
+      if (enabled && status.url) window.open(status.url, '_blank', 'noreferrer')
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  return (
+    <Dropdown
+      align="right"
+      width="w-64"
+      trigger={
+        <button
+          className={cn(
+            'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+            sync.data?.enabled ? 'bg-emerald-500/15 text-emerald-400' : 'text-fg-secondary hover:bg-ink-750 hover:text-fg',
+          )}
+          title="Google Sheets"
+        >
+          <FileSpreadsheet size={13} /> Sheets
+        </button>
+      }
+    >
+      {(close) => (
+        <>
+          <button
+            className="menu-item"
+            disabled={exporting}
+            onClick={() => {
+              void exportNow()
+              close()
+            }}
+          >
+            <FileSpreadsheet size={14} className="text-emerald-400" />
+            <span className="flex-1">Export to Google Sheets</span>
+          </button>
+          <button
+            className="menu-item"
+            disabled={exporting}
+            onClick={() => {
+              void exportTimeReport()
+              close()
+            }}
+          >
+            <Clock4 size={14} className="text-sky-400" />
+            <span className="flex-1">Export time report</span>
+          </button>
+          {sync.data?.enabled && sync.data.url && (
+            <a className="menu-item" href={sync.data.url} target="_blank" rel="noreferrer" onClick={close}>
+              <ExternalLink size={14} className="text-fg-muted" />
+              <span className="flex-1">
+                Open synced sheet
+                <span className="ml-1.5 text-[10px] text-fg-muted">
+                  {sync.data.mode === 'two_way' ? 'two-way' : 'one-way'}
+                </span>
+              </span>
+            </a>
+          )}
+          {isAdmin && !sync.data?.enabled && (
+            <>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  void toggleSync(true, 'export')
+                  close()
+                }}
+              >
+                <span className="h-2 w-2 rounded-full bg-ink-600" />
+                <span className="flex-1">Enable live sync (one-way)</span>
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  void toggleSync(true, 'two_way')
+                  close()
+                }}
+              >
+                <ArrowLeftRight size={14} className="text-fg-muted" />
+                <span className="flex-1">Enable two-way sync</span>
+              </button>
+            </>
+          )}
+          {isAdmin && sync.data?.enabled && (
+            <>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  void toggleSync(true, sync.data?.mode === 'two_way' ? 'export' : 'two_way')
+                  close()
+                }}
+              >
+                <ArrowLeftRight size={14} className="text-fg-muted" />
+                <span className="flex-1">
+                  {sync.data.mode === 'two_way' ? 'Switch to one-way mirror' : 'Switch to two-way sync'}
+                </span>
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  void toggleSync(false)
+                  close()
+                }}
+              >
+                <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                <span className="flex-1">Disable live sync</span>
+              </button>
+            </>
+          )}
+        </>
+      )}
+    </Dropdown>
   )
 }
 

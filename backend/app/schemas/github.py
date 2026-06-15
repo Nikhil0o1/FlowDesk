@@ -42,6 +42,23 @@ class RepositoryOut(ORMModel):
     created_at: datetime
 
 
+class OAuthStatusOut(BaseModel):
+    connected: bool
+    github_user_login: str | None = None
+
+
+class AvailableRepo(BaseModel):
+    repo_id: int
+    repo_full_name: str
+    default_branch: str
+    private: bool
+
+
+class RepoConnectSimple(BaseModel):
+    repo_full_name: str = Field(min_length=1, max_length=300)
+    project_id: uuid.UUID
+
+
 class GithubEventOut(ORMModel):
     id: uuid.UUID
     repository_id: uuid.UUID

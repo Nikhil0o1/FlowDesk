@@ -57,13 +57,15 @@ class Settings(BaseSettings):
     GITHUB_WEBHOOK_SECRET: str = ""
     GITHUB_APP_ID: str = ""
     GITHUB_APP_PRIVATE_KEY: str = ""
+    GITHUB_CLIENT_ID: str = ""
+    GITHUB_CLIENT_SECRET: str = ""
 
     # Jobs
     ABANDONED_TIMER_MAX_HOURS: int = 8
     SCHEDULER_ENABLED: bool = True
 
     # Superadmin bootstrap
-    SUPERADMIN_EMAIL: str = "admin@flowdesk.dev"
+    SUPERADMIN_EMAIL: str = "nikhilvardhan1592679@gmail.com"
     SUPERADMIN_PASSWORD: str = "SuperAdmin123!"
 
     @property

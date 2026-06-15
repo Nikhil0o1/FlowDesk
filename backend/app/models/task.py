@@ -71,6 +71,8 @@ class Task(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
+    github_issue_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    github_issue_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class TaskAssignee(Base, UUIDPkMixin, TimestampMixin):

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
-import { useUnreadNotifications } from '../lib/queries'
+import { useCurrentContext, useUnreadNotifications } from '../lib/queries'
 import { cn } from '../lib/utils'
 import { useAuthStore } from '../stores/auth'
 import { useUIStore, type SectionKey } from '../stores/ui'
@@ -45,6 +45,9 @@ const glow = (color: string) => ({
 
 export function IconRail() {
   const user = useAuthStore((s) => s.user)
+  const { org, workspace } = useCurrentContext()
+  const canInvite =
+    org?.my_role === 'owner' || workspace?.my_role === 'admin' || workspace?.my_role === 'owner'
   const unread = useUnreadNotifications()
   const navigate = useNavigate()
   const location = useLocation()
@@ -134,14 +137,16 @@ export function IconRail() {
           Admin
         </button>
       )}
-      <button
-        onClick={() => setInviteOpen(true)}
-        onMouseEnter={scheduleFlyoutHide}
-        className="flex w-full flex-col items-center gap-1 rounded-xl px-1 py-2.5 text-[10px] font-medium text-fg-muted transition-colors hover:bg-ink-800 hover:text-fg-secondary"
-      >
-        <UserRoundPlus size={20} strokeWidth={1.8} />
-        Invite
-      </button>
+      {canInvite && (
+        <button
+          onClick={() => setInviteOpen(true)}
+          onMouseEnter={scheduleFlyoutHide}
+          className="flex w-full flex-col items-center gap-1 rounded-xl px-1 py-2.5 text-[10px] font-medium text-fg-muted transition-colors hover:bg-ink-800 hover:text-fg-secondary"
+        >
+          <UserRoundPlus size={20} strokeWidth={1.8} />
+          Invite
+        </button>
+      )}
       <div
         className="flex w-full flex-col items-center gap-1 rounded-xl px-1 py-2.5 text-[10px] font-medium text-brand"
         onMouseEnter={scheduleFlyoutHide}

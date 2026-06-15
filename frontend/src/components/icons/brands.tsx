@@ -75,3 +75,39 @@ export function GoogleGIcon({ size = 18, className }: BrandIconProps) {
     </svg>
   )
 }
+
+export function GmailIcon({ size = 18, className }: BrandIconProps) {
+  // Official multicolor Gmail mark (2020 redesign)
+  return (
+    <svg width={size} height={size} viewBox="52 42 88 66" className={className} aria-label="Gmail">
+      <path fill="#4285f4" d="M58 108h14V74L52 59v43c0 3.32 2.69 6 6 6" />
+      <path fill="#34a853" d="M120 108h14c3.32 0 6-2.69 6-6V59l-20 15" />
+      <path fill="#fbbc04" d="M120 48v26l20-15v-8c0-7.42-8.47-11.65-14.4-7.2" />
+      <path fill="#ea4335" d="M72 74V48l24 18 24-18v26L96 92" />
+      <path fill="#c5221f" d="M52 51v8l20 15V48l-5.6-4.2c-5.94-4.45-14.4-.22-14.4 7.2" />
+    </svg>
+  )
+}
+
+export function GoogleSheetsIcon({ size = 18, className }: BrandIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-label="Google Sheets">
+      <path fill="#188038" d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7l-5-5z" />
+      <path fill="#34A853" d="M14 2v5h5l-5-5z" />
+      <path
+        fill="#fff"
+        d="M8 11h8v7H8v-7zm1.3 1.3v1.2h2.2v-1.2H9.3zm3.2 0v1.2h2.2v-1.2h-2.2zm-3.2 2.4v1.2h2.2v-1.2H9.3zm3.2 0v1.2h2.2v-1.2h-2.2z"
+      />
+    </svg>
+  )
+}
+
+export function GoogleDocsIcon({ size = 18, className }: BrandIconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-label="Google Docs">
+      <path fill="#4285F4" d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7l-5-5z" />
+      <path fill="#A1C2FA" d="M14 2v5h5l-5-5z" />
+      <path fill="#fff" d="M8 11h8v1.4H8V11zm0 2.8h8v1.4H8v-1.4zm0 2.8h5.5V18H8v-1.4z" />
+    </svg>
+  )
+}

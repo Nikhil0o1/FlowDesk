@@ -25,3 +25,4 @@ from app.models.team import Team, TeamMember  # noqa: F401
 from app.models.whiteboard import Whiteboard  # noqa: F401
 from app.models.form import Form, FormSubmission  # noqa: F401
 from app.models.calendar import CalendarConnection  # noqa: F401
+from app.models.integration import GoogleSheetSync  # noqa: F401

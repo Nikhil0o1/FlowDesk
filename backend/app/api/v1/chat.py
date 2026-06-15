@@ -104,8 +104,8 @@ def create_channel(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    # Workspace members can create channels; admins manage them
-    perms.require_workspace_member(workspace_id)
+    # Channels are workspace structure: only workspace admins / org owners create them
+    perms.require_workspace_admin(workspace_id)
     if body.project_id:
         perms.require_project_view(body.project_id)
     channel = ChatChannel(
@@ -189,6 +189,8 @@ def add_channel_members(
     perms: PermissionService = Depends(get_permissions),
 ):
     channel, member = _require_channel_member(db, perms, channel_id)
+    if member.role != "admin":
+        perms.require_workspace_admin(channel.workspace_id)
     valid_ids = set(
         db.scalars(
             select(WorkspaceMember.user_id).where(
@@ -317,6 +319,8 @@ def send_message(
         )
 
     author = user_brief(db, perms.user.id)
+    db.commit()
+    # Emit only after commit so receivers refetch committed data
     emit(
         "chat.message.created",
         [f"channel:{channel_id}"],
@@ -333,7 +337,6 @@ def send_message(
         },
         workspace_id=channel.workspace_id,
     )
-    db.commit()
     out = MessageOut.model_validate(message)
     out.author = author
     return out
@@ -366,11 +369,11 @@ def mark_channel_read(
                 last_read_message_id=body.message_id, last_read_at=now,
             )
         )
+    db.commit()
     emit(
         "chat.read",
         [f"channel:{channel_id}"],
         payload={"channel_id": str(channel_id), "user_id": str(perms.user.id),
                  "message_id": str(body.message_id)},
     )
-    db.commit()
     return Message(detail="Marked as read")

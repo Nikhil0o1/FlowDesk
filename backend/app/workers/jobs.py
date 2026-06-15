@@ -285,3 +285,20 @@ def cleanup_expired_invites(db) -> int:
         invite.status = "expired"
     db.commit()
     return len(expired)
+
+
+def google_sheet_sync(db) -> int:
+    """Mirror projects with live sync enabled to their Google Sheets."""
+    from app.models.integration import GoogleSheetSync
+    from app.services.sheet_sync_service import run_sync
+
+    syncs = db.scalars(select(GoogleSheetSync).where(GoogleSheetSync.is_active.is_(True))).all()
+    count = 0
+    for sync in syncs:
+        try:
+            if run_sync(db, sync):
+                count += 1
+        except Exception:  # noqa: BLE001 — one broken sync must not stop the rest
+            db.rollback()
+            logger.exception("Sheet sync failed for project %s", sync.project_id)
+    return count
