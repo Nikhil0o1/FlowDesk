@@ -63,6 +63,9 @@ class Task(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     task_type: Mapped[str] = mapped_column(String(20), default="task", nullable=False)
     start_date: Mapped[datetime | None] = mapped_column(Date)
     due_date: Mapped[datetime | None] = mapped_column(Date)
+    planned_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    planned_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    google_calendar_event_id: Mapped[str | None] = mapped_column(String(255))
     story_points: Mapped[int | None] = mapped_column(Integer)
     position: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     labels: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
@@ -73,6 +76,13 @@ class Task(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     )
     github_issue_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     github_issue_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    time_estimate_seconds: Mapped[int | None] = mapped_column(Integer)
+    # Sharing / privacy
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    public_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    public_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    public_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    public_searchable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class TaskAssignee(Base, UUIDPkMixin, TimestampMixin):
@@ -87,6 +97,20 @@ class TaskAssignee(Base, UUIDPkMixin, TimestampMixin):
     )
     assigned_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
+class TaskFollower(Base, UUIDPkMixin, TimestampMixin):
+    """Users following a task — receive comment notifications on that task."""
+
+    __tablename__ = "task_followers"
+    __table_args__ = (UniqueConstraint("task_id", "user_id", name="uq_task_follower"),)
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
 
 
@@ -143,3 +167,45 @@ class RecurringTask(Base, UUIDPkMixin, TimestampMixin):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+
+
+SHARE_ROLES = ("editor", "viewer")
+
+
+class TaskShareMember(Base, UUIDPkMixin, TimestampMixin):
+    """People a task is explicitly shared with (the ACL when a task is private)."""
+
+    __tablename__ = "task_share_members"
+    __table_args__ = (UniqueConstraint("task_id", "user_id", name="uq_task_share_member"),)
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(20), default="editor", nullable=False)  # editor | viewer
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
+class TaskChecklist(Base, UUIDPkMixin, TimestampMixin):
+    __tablename__ = "task_checklists"
+
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), default="Checklist", nullable=False)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class TaskChecklistItem(Base, UUIDPkMixin, TimestampMixin):
+    __tablename__ = "task_checklist_items"
+
+    checklist_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_checklists.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    content: Mapped[str] = mapped_column(String(1000), nullable=False)
+    is_done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

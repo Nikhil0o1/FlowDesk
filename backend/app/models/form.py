@@ -6,7 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPkMixin
 
-FORM_FIELD_TYPES = ("text", "textarea", "select", "date", "email")
+FORM_FIELD_TYPES = ("text", "textarea", "select", "date", "email", "checklist")
 
 
 class Form(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):

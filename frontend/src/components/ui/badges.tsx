@@ -1,7 +1,31 @@
-import { Bug, Flag, Layers, Lightbulb, SquareCheck } from 'lucide-react'
+import { Bug, CheckCircle2, CircleDashed, CircleX, Flag, Layers, Lightbulb, SquareCheck } from 'lucide-react'
 
 import type { CustomStatus, Priority, TaskType } from '../../lib/types'
 import { cn, PRIORITY_COLORS, PRIORITY_LABELS } from '../../lib/utils'
+
+/** Category-based status icon used everywhere a status is shown (ClickUp-style). */
+export function StatusIcon({
+  category,
+  color = '#87909E',
+  size = 14,
+}: {
+  category?: string | null
+  color?: string
+  size?: number
+}) {
+  if (category === 'done') return <CheckCircle2 size={size} style={{ color }} className="shrink-0" />
+  if (category === 'cancelled') return <CircleX size={size} style={{ color }} className="shrink-0" />
+  if (category === 'in_progress') {
+    // ring with a half-filled pie — the "in progress" mark
+    return (
+      <svg width={size} height={size} viewBox="0 0 16 16" className="shrink-0" style={{ color }} aria-hidden>
+        <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M8 2 A6 6 0 0 1 8 14 Z" fill="currentColor" />
+      </svg>
+    )
+  }
+  return <CircleDashed size={size} style={{ color }} className="shrink-0" />
+}
 
 export function StatusPill({ status, size = 'sm' }: { status: CustomStatus | null; size?: 'sm' | 'md' }) {
   if (!status) return <span className="text-xs text-fg-muted">No status</span>
@@ -17,10 +41,7 @@ export function StatusPill({ status, size = 'sm' }: { status: CustomStatus | nul
         backgroundColor: `${status.color}14`,
       }}
     >
-      <span
-        className="inline-block h-1.5 w-1.5 rounded-full border-2"
-        style={{ borderColor: status.color }}
-      />
+      <StatusIcon category={status.category} color={status.color} size={size === 'sm' ? 12 : 14} />
       {status.name}
     </span>
   )

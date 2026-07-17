@@ -3,15 +3,10 @@ import { CheckCircle2 } from 'lucide-react'
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 
+import { FormPublicFillCard, FormPublicPoweredBy, PUBLIC_FORM_GRADIENT } from '../../components/forms/FormPublicFillCard'
+import { PublicBreadcrumbBar } from '../../components/navigation/PublicBreadcrumbBar'
 import { errorMessage } from '../../lib/api'
-import type { PublicForm } from '../../lib/types'
-import { FormFieldsRenderer } from '../app/FormBuilderPage'
-
-async function fetchPublicForm(token: string): Promise<PublicForm> {
-  const res = await fetch(`/api/v1/public/forms/${token}`)
-  if (!res.ok) throw new Error((await res.json()).detail ?? 'Form not available')
-  return res.json()
-}
+import { fetchPublicForm, submitPublicForm } from '../../lib/publicForms'
 
 export default function PublicFormPage() {
   const { token } = useParams<{ token: string }>()
@@ -29,7 +24,7 @@ export default function PublicFormPage() {
   })
 
   const submit = async () => {
-    if (!form) return
+    if (!form || !form.is_active) return
     for (const field of form.fields) {
       if (field.required && !(values[field.id] ?? '').trim()) {
         setError(`'${field.label}' is required`)
@@ -39,15 +34,7 @@ export default function PublicFormPage() {
     setSending(true)
     setError('')
     try {
-      const res = await fetch(`/api/v1/public/forms/${token}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ values, submitter_email: email.trim() || null }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        throw new Error(typeof data.detail === 'string' ? data.detail : 'Submission failed')
-      }
+      await submitPublicForm(token!, { values, submitter_email: email.trim() || null })
       setSubmitted(true)
     } catch (err) {
       setError(errorMessage(err))
@@ -59,79 +46,71 @@ export default function PublicFormPage() {
   return (
     <div
       className="flex min-h-screen flex-col items-center px-4 py-[10vh]"
-      style={{
-        background:
-          'linear-gradient(135deg, #fde8d7 0%, #fbd9e0 18%, #ecdcf5 38%, #ffffff 60%, #e3ecfb 82%, #cfe0f7 100%)',
-      }}
+      style={{ background: PUBLIC_FORM_GRADIENT }}
     >
-      <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white p-8 shadow-xl">
+      <div className="w-full max-w-lg">
+        {!isLoading && (
+          <PublicBreadcrumbBar
+            items={[
+              { label: 'Shared form' },
+              {
+                label: form?.name ?? (isError ? 'Unavailable' : 'Loading…'),
+                current: true,
+              },
+            ]}
+          />
+        )}
         {isLoading ? (
-          <p className="py-8 text-center text-sm text-gray-500">Loading form…</p>
+          <div className="rounded-2xl border border-gray-200 bg-white p-8 shadow-xl">
+            <p className="py-8 text-center text-sm text-gray-500">Loading form…</p>
+          </div>
         ) : isError || !form ? (
-          <div className="py-8 text-center">
-            <h1 className="text-xl font-bold text-gray-900">Form unavailable</h1>
-            <p className="mt-2 text-sm text-gray-500">{isError ? errorMessage(loadError) : 'This form does not exist or is paused.'}</p>
+          <div className="rounded-2xl border border-gray-200 bg-white p-8 shadow-xl">
+            <div className="py-8 text-center">
+              <h1 className="text-xl font-bold text-gray-900">Form unavailable</h1>
+              <p className="mt-2 text-sm text-gray-500">
+                {isError ? errorMessage(loadError) : 'This form does not exist or is paused.'}
+              </p>
+            </div>
           </div>
         ) : submitted ? (
-          <div className="py-8 text-center">
-            <CheckCircle2 size={40} className="mx-auto text-emerald-500" />
-            <h1 className="mt-4 text-xl font-bold text-gray-900">Thanks! Submission received.</h1>
-            <p className="mt-1 text-sm text-gray-500">The {form.workspace_name} team will take it from here.</p>
-            <button
-              className="mt-6 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-hover"
-              onClick={() => {
-                setValues({})
-                setEmail('')
-                setSubmitted(false)
-              }}
-            >
-              Submit another response
-            </button>
+          <div className="rounded-2xl border border-gray-200 bg-white p-8 shadow-xl">
+            <div className="py-8 text-center">
+              <CheckCircle2 size={40} className="mx-auto text-emerald-500" />
+              <h1 className="mt-4 text-xl font-bold text-gray-900">Thanks! Submission received.</h1>
+              <p className="mt-1 text-sm text-gray-500">The {form.workspace_name} team will take it from here.</p>
+              <button
+                className="mt-6 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-hover"
+                onClick={() => {
+                  setValues({})
+                  setEmail('')
+                  setSubmitted(false)
+                }}
+              >
+                Submit another response
+              </button>
+            </div>
           </div>
         ) : (
-          <>
-            <div className="mb-1 flex items-center gap-2">
-              <img src="/logo.svg" alt="" className="h-6 w-6" />
-              <span className="text-xs font-medium uppercase tracking-widest text-gray-400">
-                {form.workspace_name}
-              </span>
-            </div>
-            <h1 className="text-2xl font-bold text-gray-900">{form.name}</h1>
-            {form.description && <p className="mt-1.5 text-sm text-gray-600">{form.description}</p>}
-
-            <div className="mt-6">
-              <FormFieldsRenderer
-                light
-                fields={form.fields}
-                values={values}
-                onChange={(id, v) => setValues((prev) => ({ ...prev, [id]: v }))}
-              />
-              <div className="mt-4">
-                <label className="mb-1.5 block text-sm font-medium text-gray-800">Your email (optional)</label>
-                <input
-                  type="email"
-                  className="w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
-                  placeholder="you@company.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-            </div>
-
-            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-            <button
-              onClick={submit}
-              disabled={sending}
-              className="mt-6 w-full rounded-lg bg-brand py-2.5 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:opacity-60"
-            >
-              {sending ? 'Submitting…' : 'Submit'}
-            </button>
-          </>
+          <FormPublicFillCard
+            workspaceName={form.workspace_name}
+            name={form.name}
+            description={form.description}
+            fields={form.fields}
+            values={values}
+            onChange={(id, v) => setValues((prev) => ({ ...prev, [id]: v }))}
+            email={email}
+            onEmailChange={setEmail}
+            error={error}
+            submitting={sending}
+            onSubmit={() => void submit()}
+            theme="light"
+            submitDisabled={!form.is_active}
+            paused={!form.is_active}
+          />
         )}
       </div>
-      <p className="mt-6 text-xs text-gray-500">
-        Powered by <span className="font-semibold">FlowDesk</span>
-      </p>
+      <FormPublicPoweredBy className="mt-6" />
     </div>
   )
 }

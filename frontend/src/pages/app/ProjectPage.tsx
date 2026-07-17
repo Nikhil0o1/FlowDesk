@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   ArrowLeftRight,
@@ -8,16 +8,17 @@ import {
   Clock4,
   Columns3,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   GanttChart,
   GitBranch,
   Layers,
+  LayoutDashboard,
   LayoutList,
   ListFilter,
-  Plus,
   Search,
   SquareKanban,
-  Star,
   Table as TableIcon,
   UserRound,
   X,
@@ -25,18 +26,31 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
+import { CHAT_CREATE_PATH } from '../../lib/chatAccess'
+import {
+  GithubIssueToolbarToggle,
+  useCreateGithubIssuePreference,
+} from '../../components/github/CreateGithubIssueToggle'
+import { GithubFeed } from '../../components/github/GithubFeed'
 import { api, errorMessage } from '../../lib/api'
+import { EXTERNAL_LINK_REL, openExternalUrl, safeHttpUrl } from '../../lib/safeUrl'
 import { useCurrentContext, useProject, useProjectTasks, useSpaces, useStatuses } from '../../lib/queries'
 import { recordRecent } from '../../lib/recents'
-import type { OrgMember, Priority, Task, TaskType } from '../../lib/types'
+import { favoriteProjectTarget } from '../../lib/favorites'
+import type { OrgMember, Priority, TaskType } from '../../lib/types'
 import { cn } from '../../lib/utils'
 import { useRealtime } from '../../lib/ws'
 import { useAuthStore } from '../../stores/auth'
 import { toast } from '../../stores/toast'
-import { GithubFeed } from '../../components/github/GithubFeed'
+import { FavoriteButton } from '../../components/favorites/FavoriteButton'
+import { SubtaskIcon } from '../../components/icons/subtask'
 import { InviteModal } from '../../components/invites/InviteModal'
+import { hasInheritedProjectAdmin, canEditProjectTasks } from '../../lib/projectAccess'
+import { parseTaskDueFilter } from '../../lib/projectMemberDashboardRoutes'
 import { ProjectActivity } from '../../components/projects/ProjectActivity'
+import { AddTaskModal } from '../../components/tasks/AddTaskModal'
 import { ProjectMembersModal } from '../../components/projects/ProjectMembersModal'
+import { ProjectOverview } from '../../components/projects/ProjectOverview'
 import { CalendarView } from '../../components/tasks/CalendarView'
 import { GanttView } from '../../components/tasks/GanttView'
 import { KanbanBoard } from '../../components/tasks/KanbanBoard'
@@ -45,14 +59,16 @@ import { ALL_COLS, TaskTable, type ColKey, type GroupBy } from '../../components
 import { Avatar } from '../../components/ui/Avatar'
 import { Dropdown } from '../../components/ui/Dropdown'
 import { EmptyState } from '../../components/ui/EmptyState'
-import { Modal } from '../../components/ui/Modal'
+import { RenameModal } from '../../components/ui/RenameModal'
+import { RenameButton } from '../../components/ui/RenameButton'
 import { CenteredSpinner } from '../../components/ui/Spinner'
 
-type View = 'list' | 'board' | 'calendar' | 'gantt' | 'table' | 'activity' | 'github'
+type View = 'overview' | 'list' | 'board' | 'calendar' | 'gantt' | 'table' | 'activity' | 'github'
 
 const TASK_VIEWS: View[] = ['list', 'board', 'calendar', 'gantt', 'table']
 
 const VIEW_TABS: { key: View; label: string; icon: React.ReactNode }[] = [
+  { key: 'overview', label: 'Overview', icon: <LayoutDashboard size={14} className="text-fg-secondary" /> },
   { key: 'list', label: 'List', icon: <LayoutList size={14} className="text-fg-secondary" /> },
   { key: 'board', label: 'Board', icon: <SquareKanban size={14} className="text-[#5B9FF0]" /> },
   { key: 'calendar', label: 'Calendar', icon: <CalendarIcon size={14} className="text-[#F2994A]" /> },
@@ -66,12 +82,15 @@ export default function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>()
   const [params, setParams] = useSearchParams()
   const view = (params.get('view') as View) ?? 'list'
+  const dueFilter = parseTaskDueFilter(params.get('due'))
+  const assigneeMeFromUrl = params.get('assignee') === 'me'
+  const openOnlyFromUrl = params.get('open_only') === '1'
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
   const { org, workspace } = useCurrentContext()
   const canManageWorkspace =
-    workspace?.my_role === 'admin' || workspace?.my_role === 'owner' || org?.my_role === 'owner'
+    workspace?.my_role === 'admin' || workspace?.my_role === 'owner' || (org?.my_role === 'owner' || org?.my_role === 'admin')
 
   const project = useProject(projectId)
   const statuses = useStatuses(projectId)
@@ -89,12 +108,19 @@ export default function ProjectPage() {
   const [priority, setPriority] = useState<Priority | ''>('')
   const [taskType, setTaskType] = useState<TaskType | ''>('')
   const [assigneeId, setAssigneeId] = useState<string>('')
-  const [showClosed, setShowClosed] = useState(false)
+  // Completed tasks stay visible by default (they live in their Complete column /
+  // group, struck through). This toggle optionally hides them.
+  const [hideCompleted, setHideCompleted] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [q, setQ] = useState('')
   const [addTaskOpen, setAddTaskOpen] = useState(false)
+  const [createGithubIssue, setCreateGithubIssue] = useCreateGithubIssuePreference()
   const [membersOpen, setMembersOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+
+  const canRenameOrgResources = org?.my_role === 'owner' || org?.my_role === 'admin'
 
   const filterParams = useMemo(() => {
     let s = ''
@@ -102,9 +128,10 @@ export default function ProjectPage() {
     if (priority) s += `&priority=${priority}`
     if (taskType) s += `&task_type=${taskType}`
     if (assigneeId) s += `&assignee_id=${assigneeId}`
+    if (dueFilter) s += `&due=${dueFilter}`
     if (showSubtasks) s += `&include_subtasks=true`
     return s
-  }, [q, priority, taskType, assigneeId, showSubtasks])
+  }, [q, priority, taskType, assigneeId, dueFilter, showSubtasks])
 
   const tasks = useProjectTasks(projectId, filterParams)
 
@@ -125,6 +152,14 @@ export default function ProjectPage() {
     }
   }, [project.data?.id, spaceName])
 
+  useEffect(() => {
+    if (assigneeMeFromUrl && user?.id) setAssigneeId(user.id)
+  }, [assigneeMeFromUrl, user?.id])
+
+  useEffect(() => {
+    if (openOnlyFromUrl) setHideCompleted(true)
+  }, [openOnlyFromUrl])
+
   if (project.isLoading) return <CenteredSpinner />
   if (!project.data) {
     return <EmptyState icon={Layers} title="Project not found" description="It may have been deleted or you don't have access." />
@@ -132,11 +167,21 @@ export default function ProjectPage() {
 
   const proj = project.data
   const space = spaces.data?.find((s) => s.id === proj.space_id)
-  const canEdit = proj.my_role !== 'viewer'
+  const canEdit = canEditProjectTasks(proj.my_role)
+  const inheritedProjectAdmin = hasInheritedProjectAdmin(proj)
+  const inheritedAccessLabel = inheritedProjectAdmin
+    ? space?.my_role === 'admin'
+      ? `${space.name} space admin`
+      : workspace?.my_role === 'admin' || workspace?.my_role === 'owner'
+        ? 'workspace admin'
+        : org?.my_role === 'owner' || org?.my_role === 'admin'
+          ? 'organization admin'
+          : 'inherited admin'
+    : undefined
   const isTaskView = TASK_VIEWS.includes(view)
 
   const visibleTasks = (tasks.data?.items ?? []).filter(
-    (t) => showClosed || !t.completed_at,
+    (t) => !hideCompleted || !t.completed_at,
   )
 
   const setView = (v: View) => {
@@ -147,33 +192,32 @@ export default function ProjectPage() {
   const filterCount = (priority ? 1 : 0) + (taskType ? 1 : 0)
   const assigneeMember = members.data?.find((m) => m.user_id === assigneeId)
 
+  const renameProject = async (name: string) => {
+    setRenaming(true)
+    try {
+      await api.patch(`/projects/${proj.id}`, { name })
+      void queryClient.invalidateQueries({ queryKey: ['project', proj.id] })
+      void queryClient.invalidateQueries({ queryKey: ['projects', proj.workspace_id] })
+      toast.success('Project renamed')
+      setRenameOpen(false)
+    } catch (err) {
+      toast.error(errorMessage(err))
+    } finally {
+      setRenaming(false)
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
-      {/* ---- Breadcrumb + view tabs ---- */}
+      {/* ---- Project header + view tabs ---- */}
       <div className="shrink-0 border-b border-ink-700 px-6 pt-3">
         <div className="flex items-center gap-2 text-sm">
-          {space && (
-            <>
-              <span className="flex items-center gap-1.5 text-fg-secondary">
-                <span
-                  className="flex items-center justify-center rounded text-[9px] font-bold text-white"
-                  style={{ backgroundColor: space.color, width: 18, height: 18 }}
-                >
-                  {space.name[0]}
-                </span>
-                {space.name}
-              </span>
-              <span className="text-fg-muted">/</span>
-            </>
-          )}
-          <span className="flex items-center gap-1.5 font-semibold text-fg">
-            <LayoutList size={15} style={{ color: proj.color }} />
-            {proj.name}
+          <span className="group/name flex min-w-0 items-center gap-1 font-semibold text-fg">
+            <LayoutList size={15} className="shrink-0" style={{ color: proj.color }} />
+            <span className="truncate">{proj.name}</span>
+            {canRenameOrgResources && <RenameButton onClick={() => setRenameOpen(true)} />}
           </span>
-          <Star size={14} className="cursor-pointer text-fg-muted hover:text-amber-400" />
-          <span className="rounded bg-ink-750 px-1.5 py-0.5 text-[10px] font-semibold text-fg-secondary">
-            {proj.key}
-          </span>
+          <FavoriteButton target={favoriteProjectTarget(proj.id, proj.name)} />
         </div>
 
         <div className="mt-2 flex items-center">
@@ -186,7 +230,7 @@ export default function ProjectPage() {
           {canManageWorkspace && (
             <>
               <button
-                onClick={() => navigate('/app/chat?new=1')}
+                onClick={() => navigate(CHAT_CREATE_PATH)}
                 className="mr-2 rounded-lg border border-ink-700 px-2.5 py-1 text-xs font-medium text-fg-secondary transition-colors hover:bg-ink-800 hover:text-fg"
               >
                 Add Channel
@@ -255,7 +299,7 @@ export default function ProjectPage() {
               )}
               onClick={() => setShowSubtasks((v) => !v)}
             >
-              <GitBranch size={13} /> Subtasks
+              <SubtaskIcon size={13} /> Subtasks
             </button>
           )}
 
@@ -293,7 +337,13 @@ export default function ProjectPage() {
 
           <span className="flex-1" />
 
-          {/* Filter */}
+          {canEdit && (
+            <GithubIssueToolbarToggle
+              projectId={proj.id}
+              checked={createGithubIssue}
+              onChange={setCreateGithubIssue}
+            />
+          )}
           <Dropdown
             align="right"
             width="w-56"
@@ -345,15 +395,17 @@ export default function ProjectPage() {
             )}
           </Dropdown>
 
-          {/* Closed */}
+          {/* Hide completed */}
           <button
             className={cn(
               'flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
-              showClosed ? 'bg-brand-soft text-brand' : 'text-fg-secondary hover:bg-ink-750 hover:text-fg',
+              hideCompleted ? 'bg-brand-soft text-brand' : 'text-fg-secondary hover:bg-ink-750 hover:text-fg',
             )}
-            onClick={() => setShowClosed((v) => !v)}
+            onClick={() => setHideCompleted((v) => !v)}
+            title={hideCompleted ? 'Completed tasks are hidden' : 'Completed tasks are shown'}
           >
-            <CheckCircle2 size={13} /> Closed
+            {hideCompleted ? <EyeOff size={13} /> : <CheckCircle2 size={13} />}
+            {hideCompleted ? 'Hidden' : 'Complete'}
           </button>
 
           {/* Assignee */}
@@ -464,6 +516,13 @@ export default function ProjectPage() {
         </div>
       )}
 
+      {!canEdit && isTaskView && (
+        <div className="mx-4 mb-2 flex shrink-0 items-center gap-2 rounded-lg border border-ink-700/80 bg-ink-900/50 px-3 py-1.5 text-xs text-fg-secondary">
+          <Eye size={14} className="shrink-0 text-fg-muted" />
+          View-only — browse project tasks; you cannot create or edit them.
+        </div>
+      )}
+
       {/* ---- Content ---- */}
       <div className={cn('min-h-0 flex-1', view === 'calendar' || view === 'gantt' ? 'overflow-hidden' : 'overflow-y-auto')}>
         {isTaskView && (tasks.isLoading || statuses.isLoading) ? (
@@ -478,29 +537,64 @@ export default function ProjectPage() {
                 canEdit={canEdit}
                 groupBy={groupBy}
                 cols={visibleCols}
+                createGithubIssue={createGithubIssue}
               />
             )}
             {view === 'board' && (
-              <KanbanBoard projectId={proj.id} tasks={visibleTasks} statuses={statuses.data ?? []} canEdit={canEdit} />
+              <KanbanBoard
+                projectId={proj.id}
+                tasks={visibleTasks}
+                statuses={statuses.data ?? []}
+                canEdit={canEdit}
+                createGithubIssue={createGithubIssue}
+              />
             )}
-            {view === 'calendar' && <CalendarView projectId={proj.id} tasks={visibleTasks} canEdit={canEdit} />}
+            {view === 'calendar' && (
+              <CalendarView
+                projectId={proj.id}
+                tasks={visibleTasks}
+                canEdit={canEdit}
+                createGithubIssue={createGithubIssue}
+              />
+            )}
             {view === 'gantt' && (
-              <GanttView projectId={proj.id} projectName={proj.name} tasks={visibleTasks} canEdit={canEdit} />
+              <GanttView
+                projectId={proj.id}
+                projectName={proj.name}
+                tasks={visibleTasks}
+                canEdit={canEdit}
+                createGithubIssue={createGithubIssue}
+              />
             )}
-            {view === 'table' && <TableView projectId={proj.id} tasks={visibleTasks} canEdit={canEdit} />}
+            {view === 'table' && (
+              <TableView
+                projectId={proj.id}
+                tasks={visibleTasks}
+                canEdit={canEdit}
+                createGithubIssue={createGithubIssue}
+              />
+            )}
+            {view === 'overview' && (
+              <ProjectOverview projectId={proj.id} isAdmin={proj.my_role === 'admin' || inheritedProjectAdmin} />
+            )}
             {view === 'activity' && <ProjectActivity projectId={proj.id} />}
             {view === 'github' && <GithubFeed projectId={proj.id} />}
           </>
         )}
       </div>
 
-      <AddTaskModal projectId={proj.id} open={addTaskOpen} onClose={() => setAddTaskOpen(false)} />
+      <AddTaskModal
+        projectId={proj.id}
+        open={addTaskOpen}
+        onClose={() => setAddTaskOpen(false)}
+        createGithubIssue={createGithubIssue}
+      />
       <ProjectMembersModal
         open={membersOpen}
         onClose={() => setMembersOpen(false)}
         projectId={proj.id}
         workspaceId={proj.workspace_id}
-        canManage={proj.my_role === 'admin' || canManageWorkspace}
+        inheritedAccessLabel={inheritedAccessLabel}
         onInviteByEmail={() => {
           setMembersOpen(false)
           setInviteOpen(true)
@@ -509,9 +603,18 @@ export default function ProjectPage() {
       <InviteModal
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
-        defaultScope="project"
+        defaultScope={inheritedProjectAdmin && space?.my_role === 'admin' ? 'space' : 'project'}
         defaultWorkspaceId={proj.workspace_id}
         defaultProjectId={proj.id}
+      />
+      <RenameModal
+        open={renameOpen}
+        onClose={() => setRenameOpen(false)}
+        title="Rename project"
+        label="Project name"
+        initialName={proj.name}
+        onSave={renameProject}
+        saving={renaming}
       />
     </div>
   )
@@ -540,7 +643,7 @@ function SheetsMenu({ projectId, isAdmin }: { projectId: string; isAdmin: boolea
     try {
       const { url } = await api.post<{ url: string }>(`/projects/${projectId}/sheets/export`)
       toast.success('Exported to Google Sheets')
-      window.open(url, '_blank', 'noreferrer')
+      openExternalUrl(url)
     } catch (err) {
       toast.error(errorMessage(err))
     } finally {
@@ -553,7 +656,7 @@ function SheetsMenu({ projectId, isAdmin }: { projectId: string; isAdmin: boolea
     try {
       const { url } = await api.post<{ url: string }>(`/projects/${projectId}/sheets/time-report`)
       toast.success('Time report exported — Entries + Summary tabs')
-      window.open(url, '_blank', 'noreferrer')
+      openExternalUrl(url)
     } catch (err) {
       toast.error(errorMessage(err))
     } finally {
@@ -572,7 +675,7 @@ function SheetsMenu({ projectId, isAdmin }: { projectId: string; isAdmin: boolea
             : 'Live sync enabled — sheet updates every 10 minutes',
       )
       void queryClient.invalidateQueries({ queryKey: ['sheet-sync', projectId] })
-      if (enabled && status.url) window.open(status.url, '_blank', 'noreferrer')
+      if (enabled && status.url) openExternalUrl(status.url)
     } catch (err) {
       toast.error(errorMessage(err))
     }
@@ -619,7 +722,7 @@ function SheetsMenu({ projectId, isAdmin }: { projectId: string; isAdmin: boolea
             <span className="flex-1">Export time report</span>
           </button>
           {sync.data?.enabled && sync.data.url && (
-            <a className="menu-item" href={sync.data.url} target="_blank" rel="noreferrer" onClick={close}>
+            <a className="menu-item" href={safeHttpUrl(sync.data.url) ?? undefined} target="_blank" rel={EXTERNAL_LINK_REL} onClick={close}>
               <ExternalLink size={14} className="text-fg-muted" />
               <span className="flex-1">
                 Open synced sheet
@@ -685,38 +788,3 @@ function SheetsMenu({ projectId, isAdmin }: { projectId: string; isAdmin: boolea
   )
 }
 
-function AddTaskModal({ projectId, open, onClose }: { projectId: string; open: boolean; onClose: () => void }) {
-  const [title, setTitle] = useState('')
-  const queryClient = useQueryClient()
-  const navigate = useNavigate()
-
-  const create = useMutation({
-    mutationFn: () => api.post<Task>(`/projects/${projectId}/tasks`, { title: title.trim() }),
-    onSuccess: (task) => {
-      toast.success(`${task.ref} created`)
-      setTitle('')
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
-      onClose()
-      navigate(`/app/tasks/${task.id}`)
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
-
-  return (
-    <Modal open={open} onClose={onClose} title="Add Task" width="max-w-md">
-      <div className="space-y-3">
-        <input
-          autoFocus
-          className="input-dark"
-          placeholder="Task Name"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && title.trim() && create.mutate()}
-        />
-        <button className="btn-primary w-full" disabled={!title.trim() || create.isPending} onClick={() => create.mutate()}>
-          <Plus size={14} /> Create task
-        </button>
-      </div>
-    </Modal>
-  )
-}

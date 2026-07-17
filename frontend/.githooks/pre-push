@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs tests + build before any push; blocks direct push to main.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    echo "ERROR: Direct push to main is blocked."
+    echo "       Merge development via pull request instead."
+    exit 1
+  fi
+done
+
+echo "Running frontend tests before push..."
+npm test
+
+echo "Running production build before push..."
+npm run build
+
+echo "Pre-push checks passed."
+exit 0

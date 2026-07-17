@@ -2,39 +2,341 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
+    branches: [main, development]
+  workflow_dispatch:
+
+concurrency:
+  group: api-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to backend/.python-version (Render runtime).
+  PYTHON_VERSION: "3.11.9"
 
 jobs:
-  test:
+  check-scope:
+    name: Check deployment scope
     runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.scope.outputs.should_deploy }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether full backend CI should run
+        id: scope
+        run: |
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+  security-scan:
+    name: Security Scan (pip-audit + Snyk + Gitleaks + TruffleHog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [check-scope]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install audit tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pip-audit (known CVEs in pinned dependencies)
+        id: pip_audit
+        run: pip-audit -r requirements.txt --progress-spinner off
+        continue-on-error: true
+
+      - name: Check SNYK_TOKEN availability
+        id: snyk_token_check
+        run: |
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "SNYK_TOKEN secret is not configured — Snyk scans will be skipped."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "SNYK_TOKEN is present."
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Install Snyk CLI
+        if: steps.snyk_token_check.outputs.available == 'true'
+        run: npm install -g snyk@1.1304.1
+
+      - name: Run Snyk (dependency vulnerabilities)
+        id: snyk
+        if: steps.snyk_token_check.outputs.available == 'true'
+        run: snyk test --file=requirements.txt --package-manager=pip --severity-threshold=critical --json > snyk-report.json
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Run Snyk Code (static analysis / SAST)
+        id: snyk_code
+        if: steps.snyk_token_check.outputs.available == 'true'
+        run: snyk code test --severity-threshold=critical --json > snyk-code-report.json
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Snyk scan diagnostics (if a Snyk step failed)
+        if: always() && steps.snyk_token_check.outputs.available == 'true' && (steps.snyk.outcome == 'failure' || steps.snyk_code.outcome == 'failure')
+        run: |
+          echo "=== snyk test (Open Source) — first 6k of snyk-report.json ==="
+          head -c 6144 snyk-report.json 2>/dev/null || echo "(missing or empty)"
+          echo ""
+          echo "=== snyk code — first 6k of snyk-code-report.json ==="
+          head -c 6144 snyk-code-report.json 2>/dev/null || echo "(missing or empty)"
+
+      - name: Scan for hardcoded secrets (trufflehog)
+        id: trufflehog
+        continue-on-error: true
+        uses: trufflesecurity/trufflehog@v3.82.6
+        with:
+          path: ./
+          base: ${{ github.event.before && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || 'HEAD~1' }}
+          head: ${{ github.sha }}
+          extra_args: --only-verified
+
+      - name: Scan for hardcoded secrets (gitleaks)
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          GITLEAKS_VERSION="8.18.4"
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.sha }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            LOG_OPTS="-1 $HEAD"
+          else
+            LOG_OPTS="$BASE..$HEAD"
+          fi
+          ./gitleaks detect \
+            --source=. \
+            --redact \
+            --log-opts="$LOG_OPTS" \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --exit-code 1
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-security-reports
+          path: |
+            snyk-report.json
+            snyk-code-report.json
+            gitleaks-report.json
+
+      - name: Fail if any security scan found issues
+        run: |
+          FAILED=false
+          if [ "${{ steps.pip_audit.outcome }}" = "failure" ]; then
+            echo "pip-audit found known vulnerabilities in dependencies."
+            FAILED=true
+          fi
+          if [ "${{ steps.snyk_token_check.outputs.available }}" != "true" ]; then
+            echo "Snyk scans were skipped (SNYK_TOKEN not configured)."
+          else
+            if [ "${{ steps.snyk.outcome }}" = "failure" ]; then
+              echo "Snyk found vulnerable dependencies."
+              FAILED=true
+            fi
+            if [ "${{ steps.snyk_code.outcome }}" = "failure" ]; then
+              echo "Snyk Code found source-level security issues."
+              FAILED=true
+            fi
+          fi
+          if [ "${{ steps.gitleaks.outcome }}" = "failure" ]; then
+            echo "Gitleaks found potential secrets."
+            FAILED=true
+          fi
+          if [ "${{ steps.trufflehog.outcome }}" = "failure" ]; then
+            echo "TruffleHog reported verified secrets."
+            FAILED=true
+          fi
+          if [ "$FAILED" = "true" ]; then exit 1; fi
+          echo "All security scans passed."
+
+  run-tests:
+    name: Run Backend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [check-scope]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: flowdesk
-          POSTGRES_PASSWORD: flowdesk
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: flowdesk
-        ports: ['5432:5432']
+        ports:
+          - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U flowdesk"
-          --health-interval 5s
+          --health-cmd pg_isready
+          --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 5
+
     env:
-      DATABASE_URL: postgresql+psycopg2://flowdesk:flowdesk@localhost:5432/flowdesk
-      SECRET_KEY: ci-only-secret-not-used-anywhere-real
-      EMAIL_ENABLED: 'false'
-      SCHEDULER_ENABLED: 'false'
+      # conftest.py supplies the rest via os.environ.setdefault(); these two are the
+      # values it does NOT set: the live DB (so the suite uses the service Postgres,
+      # whose superuser can CREATE the per-session "flowdesk_test" database) and the
+      # required STORAGE_BACKEND setting. Redis is disabled (Celery runs eager).
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/flowdesk
+      STORAGE_BACKEND: local
+      REDIS_URL: ""
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Validate migrations apply cleanly
+        run: |
+          python -m pip install --upgrade pip
+          # Old `fpdf` shadows `fpdf2` (same import path) and lacks write_html.
+          pip uninstall -y fpdf || true
+          pip install -r requirements-dev.txt
+
+      - name: Check PAT docs registry drift
+        run: python scripts/check_pat_docs_drift.py
+        env:
+          ENVIRONMENT: development
+          DEBUG: "true"
+          SECRET_KEY: ci-inventory-only
+          FRONTEND_URL: http://localhost:5173
+          BACKEND_URL: http://localhost:8000
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/flowdesk
+          MICROSOFT_TENANT: common
+          STORAGE_BACKEND: local
+          API_KEY_PEPPERS: '{"1":"ci-inventory-pepper"}'
+          API_KEY_PEPPER_CURRENT: "1"
+          REDIS_URL: ""
+
+      - name: Run tests with coverage
+        # Coverage source/omit and the fail_under=95 gate come from .coveragerc.
+        run: |
+          pytest \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-report=html \
+            --junitxml=pytest-report.xml
+
+      - name: Upload coverage & test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+            pytest-report.xml
+
+  migrations:
+    name: Migrations (apply on fresh DB + drift check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [check-scope]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: flowdesk_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # alembic/env.py imports app settings, so all "Zone 1: Required" settings must
+      # be present (conftest is not loaded for a bare alembic run).
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/flowdesk_migrations
+      ENVIRONMENT: ci
+      DEBUG: "false"
+      SECRET_KEY: ci-not-a-real-secret
+      FRONTEND_URL: http://localhost:5173
+      BACKEND_URL: http://localhost:8000
+      MICROSOFT_TENANT: common
+      STORAGE_BACKEND: local
+      REDIS_URL: ""
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Apply all migrations on a clean database
         run: alembic upgrade head
-      - name: Run tests
-        run: python -m pytest app/tests -q
+
+      - name: Verify a full downgrade is reversible
+        run: alembic downgrade base
+
+      - name: Re-apply to confirm a repeatable migration path
+        run: alembic upgrade head
+
+      - name: Check models match migrations (non-blocking)
+        # Surfaces model/migration drift. Non-blocking for now: there is a known
+        # pre-existing diff (a revoked_access_tokens.jti unique constraint). Flip to
+        # a hard gate once `alembic check` reports clean.
+        run: alembic check
+        continue-on-error: true
+
+  ci-success:
+    name: All checks passed
+    runs-on: ubuntu-latest
+    needs: [check-scope, security-scan, run-tests, migrations]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+    steps:
+      - run: echo "All API CI checks passed."

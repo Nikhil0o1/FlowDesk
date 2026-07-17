@@ -1,10 +1,14 @@
 import uuid
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, String
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, String, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPkMixin
+
+# GitHub connection types (see GithubConnection)
+CONNECTION_PERSONAL = "personal"
+CONNECTION_PROJECT = "project"
 
 
 class GithubInstallation(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
@@ -24,8 +28,13 @@ class GithubInstallation(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
 class GithubRepository(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "github_repositories"
 
-    installation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("github_installations.id", ondelete="CASCADE"), index=True, nullable=False
+    # Legacy GitHub-App grouping (nullable now that OAuth connections are primary)
+    installation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("github_installations.id", ondelete="CASCADE"), index=True
+    )
+    # The workspace connection whose token operates this repo (webhooks, status mirror)
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("github_connections.id", ondelete="SET NULL"), index=True
     )
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
@@ -60,17 +69,56 @@ class GithubEvent(Base, UUIDPkMixin, TimestampMixin):
     delivery_id: Mapped[str | None] = mapped_column(String(80), unique=True)
 
 
-class GithubOAuthToken(Base, UUIDPkMixin, TimestampMixin):
-    __tablename__ = "github_oauth_tokens"
+class GithubConnection(Base, UUIDPkMixin, TimestampMixin):
+    """A GitHub OAuth connection. Two kinds:
+
+    - ``personal`` — one per (organization, user). Acts AS the member: create
+      issues / branches / PRs, link previews. Private to that user.
+    - ``project`` — one per project, created by a project lead/admin. Shared by
+      everyone on that project: powers incoming webhook activity sync, task
+      status automation, repo linking and connected search. Independent per
+      project, so the same person leading two projects connects each separately.
+    """
+
+    __tablename__ = "github_connections"
+    __table_args__ = (
+        # A user has at most one personal connection per organization
+        Index(
+            "uq_github_conn_personal", "organization_id", "user_id",
+            unique=True, postgresql_where=text("connection_type = 'personal'"),
+        ),
+        # A project has at most one shared connection
+        Index(
+            "uq_github_conn_project", "project_id",
+            unique=True, postgresql_where=text("connection_type = 'project'"),
+        ),
+    )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
-        unique=True, index=True, nullable=False
+        index=True, nullable=False
+    )
+    connection_type: Mapped[str] = mapped_column(
+        String(20), default=CONNECTION_PERSONAL, nullable=False
+    )  # personal | project
+    # Set for personal connections
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # Set for project connections
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     access_token: Mapped[str] = mapped_column(String(500), nullable=False)
-    scope: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    scope: Mapped[str] = mapped_column(String(500), default="", nullable=False)  # OAuth scopes granted
     github_user_login: Mapped[str] = mapped_column(String(200), nullable=False)
     github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     connected_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+
+    # Project-connection settings (unused for personal)
+    branch_name_format: Mapped[str] = mapped_column(
+        String(200), default=":taskId:-:taskName:", nullable=False
+    )
+    connected_search_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

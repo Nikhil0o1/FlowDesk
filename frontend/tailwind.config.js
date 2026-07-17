@@ -1,28 +1,28 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {
-        // Dark app surfaces — true black base with minimal elevation steps
         ink: {
-          950: '#000000', // page background
-          900: '#050505', // content background
-          850: '#0A0A0B', // panel / sidebar
-          800: '#111113', // raised (cards, inputs)
-          750: '#18181B', // hover
-          700: '#202023', // borders
-          600: '#2E2E33', // strong borders
+          950: 'var(--ink-950)',
+          900: 'var(--ink-900)',
+          850: 'var(--ink-850)',
+          800: 'var(--ink-800)',
+          750: 'var(--ink-750)',
+          700: 'var(--ink-700)',
+          600: 'var(--ink-600)',
         },
         fg: {
-          DEFAULT: '#ECECEE',
-          secondary: '#9B9DA5',
-          muted: '#6C6F77',
+          DEFAULT: 'var(--fg)',
+          secondary: 'var(--fg-secondary)',
+          muted: 'var(--fg-muted)',
         },
         brand: {
-          DEFAULT: '#8C5BFF',
-          hover: '#9D73FF',
-          soft: 'rgba(140,91,255,0.16)',
+          DEFAULT: 'var(--brand)',
+          hover: 'var(--brand-hover)',
+          soft: 'var(--brand-soft)',
         },
         priority: {
           urgent: '#E5484D',
@@ -40,6 +40,13 @@ export default {
           'Segoe UI',
           'Roboto',
           'sans-serif',
+        ],
+        serif: [
+          'ui-serif',
+          'Georgia',
+          'Cambria',
+          'Times New Roman',
+          'serif',
         ],
       },
       boxShadow: {

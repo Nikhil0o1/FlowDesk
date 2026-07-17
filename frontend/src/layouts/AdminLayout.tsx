@@ -5,6 +5,7 @@ import { logout } from '../lib/api'
 import { cn } from '../lib/utils'
 import { displayName, useAuthStore } from '../stores/auth'
 import { Avatar } from '../components/ui/Avatar'
+import { AdminBreadcrumbBar } from '../components/navigation/AdminBreadcrumbBar'
 
 export default function AdminLayout() {
   const user = useAuthStore((s) => s.user)
@@ -64,9 +65,12 @@ export default function AdminLayout() {
           </div>
         </div>
       </aside>
-      <main className="min-w-0 flex-1 overflow-y-auto bg-ink-900">
-        <Outlet />
-      </main>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <AdminBreadcrumbBar />
+        <main className="min-h-0 flex-1 overflow-y-auto bg-ink-900">
+          <Outlet />
+        </main>
+      </div>
     </div>
   )
 }

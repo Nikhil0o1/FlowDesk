@@ -7,7 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDPkMixin
 
-INVITE_SCOPES = ("organization", "workspace", "project")
+INVITE_SCOPES = ("organization", "workspace", "space", "project")
 INVITE_STATUSES = ("pending", "accepted", "expired", "revoked")
 
 
@@ -27,6 +27,9 @@ class Invite(Base, UUIDPkMixin, TimestampMixin):
     )
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE")
+    )
+    space_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("spaces.id", ondelete="CASCADE")
     )
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE")

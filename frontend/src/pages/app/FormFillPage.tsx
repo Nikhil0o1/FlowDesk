@@ -1,13 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, CheckCircle2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, Copy } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
+import { copyPublicFormLink } from '../../lib/publicForms'
 import type { FormDef } from '../../lib/types'
 import { toast } from '../../stores/toast'
 import { CenteredSpinner } from '../../components/ui/Spinner'
-import { FormFieldsRenderer } from './FormBuilderPage'
+import { FormFieldsRenderer } from '../../components/forms/FormFieldsRenderer'
 
 /** In-app form filling for workspace/project members. Submissions create real tasks. */
 export default function FormFillPage() {
@@ -17,13 +18,29 @@ export default function FormFillPage() {
   const [result, setResult] = useState<{ task_id: string; task_ref: string } | null>(null)
   const [sending, setSending] = useState(false)
 
-  const { data: form, isLoading } = useQuery({
+  const { data: form, isLoading, isError, error: loadError } = useQuery({
     queryKey: ['form', formId],
     queryFn: () => api.get<FormDef>(`/forms/${formId}`),
     enabled: !!formId,
+    retry: false,
   })
 
-  if (isLoading || !form) return <CenteredSpinner />
+  if (isLoading) return <CenteredSpinner />
+  if (isError || !form) {
+    return (
+      <div className="mx-auto max-w-xl px-6 py-8">
+        <button className="btn-ghost mb-4 !px-2 text-xs" onClick={() => navigate('/app/forms')}>
+          <ArrowLeft size={14} /> All forms
+        </button>
+        <div className="rounded-2xl border border-ink-700 bg-ink-850/50 p-7 text-center">
+          <h1 className="text-lg font-bold text-fg">Form unavailable</h1>
+          <p className="mt-2 text-sm text-fg-secondary">
+            {isError ? errorMessage(loadError) : 'You do not have access to this form.'}
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   const submit = async () => {
     for (const field of form.fields) {
@@ -48,9 +65,20 @@ export default function FormFillPage() {
 
   return (
     <div className="mx-auto max-w-xl px-6 py-8">
-      <button className="btn-ghost mb-4 !px-2 text-xs" onClick={() => navigate('/app/forms')}>
-        <ArrowLeft size={14} /> All forms
-      </button>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <button className="btn-ghost !px-2 text-xs" onClick={() => navigate('/app/forms')}>
+          <ArrowLeft size={14} /> All forms
+        </button>
+        <button
+          className="btn-secondary !py-1.5 text-xs"
+          onClick={async () => {
+            await copyPublicFormLink(form.public_token)
+            toast.success('Link copied')
+          }}
+        >
+          <Copy size={13} /> Copy link
+        </button>
+      </div>
 
       <div className="rounded-2xl border border-ink-700 bg-ink-850/50 p-7">
         {result ? (

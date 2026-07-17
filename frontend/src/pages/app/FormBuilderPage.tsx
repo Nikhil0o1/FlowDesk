@@ -4,26 +4,36 @@ import {
   ArrowLeft,
   ArrowUp,
   Copy,
-  ExternalLink,
+  Settings2,
   Plus,
   Trash2,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
+import { FieldOptionsEditor } from '../../components/forms/FieldOptionsEditor'
+import { FormPublicFillCard, FormPublicPoweredBy } from '../../components/forms/FormPublicFillCard'
+import { FormSharePanel } from '../../components/forms/FormSharePanel'
 import { api, errorMessage } from '../../lib/api'
+import { copyPublicFormLink } from '../../lib/publicForms'
+import { useCurrentContext } from '../../lib/queries'
 import type { FormDef, FormField, FormFieldType, FormSubmission, Page } from '../../lib/types'
 import { cn, formatDateTime } from '../../lib/utils'
 import { toast } from '../../stores/toast'
+import { useUIStore } from '../../stores/ui'
 import { CenteredSpinner } from '../../components/ui/Spinner'
 
 const FIELD_TYPES: { type: FormFieldType; label: string }[] = [
   { type: 'text', label: 'Short text' },
   { type: 'textarea', label: 'Long text' },
   { type: 'select', label: 'Dropdown' },
+  { type: 'checklist', label: 'Checkbox' },
   { type: 'date', label: 'Date' },
   { type: 'email', label: 'Email' },
 ]
+
+const OPTIONS_FIELD_TYPES: FormFieldType[] = ['select', 'checklist']
+const defaultOptions = () => ['Option 1', 'Option 2']
 
 let fieldSeq = Date.now()
 const newFieldId = () => `f-${(fieldSeq++).toString(36)}`
@@ -33,6 +43,7 @@ export default function FormBuilderPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [params, setParams] = useSearchParams()
+  const { org, workspace, isLoading: contextLoading } = useCurrentContext()
   const tab = params.get('tab') === 'submissions' ? 'submissions' : 'builder'
 
   const { data: form, isLoading } = useQuery({
@@ -43,10 +54,22 @@ export default function FormBuilderPage() {
 
   const [fields, setFields] = useState<FormField[] | null>(null)
   const [dirty, setDirty] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
 
   useEffect(() => {
     if (form && fields === null) setFields(form.fields)
   }, [form, fields])
+
+  const canManageForms =
+    (org?.my_role === 'owner' || org?.my_role === 'admin') ||
+    workspace?.my_role === 'owner' ||
+    workspace?.my_role === 'admin'
+
+  useEffect(() => {
+    if (form && !contextLoading && !canManageForms) {
+      navigate(`/app/forms/${form.id}/fill`, { replace: true })
+    }
+  }, [canManageForms, contextLoading, form, navigate])
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) => api.patch<FormDef>(`/forms/${formId}`, body),
@@ -58,9 +81,7 @@ export default function FormBuilderPage() {
     onError: (err) => toast.error(errorMessage(err)),
   })
 
-  if (isLoading || !form || fields === null) return <CenteredSpinner />
-
-  const publicUrl = `${window.location.origin}/f/${form.public_token}`
+  if (isLoading || contextLoading || !form || fields === null || !canManageForms) return <CenteredSpinner />
 
   const updateFields = (next: FormField[]) => {
     setFields(next)
@@ -68,7 +89,7 @@ export default function FormBuilderPage() {
   }
 
   const copyLink = async () => {
-    await navigator.clipboard.writeText(publicUrl)
+    await copyPublicFormLink(form.public_token)
     toast.success('Public link copied')
   }
 
@@ -95,12 +116,12 @@ export default function FormBuilderPage() {
         <button className="btn-secondary !py-1.5 text-xs" onClick={() => navigate(`/app/forms/${form.id}/fill`)}>
           Fill out
         </button>
-        <button className="btn-secondary !py-1.5 text-xs" onClick={copyLink}>
+        <button className="btn-secondary !py-1.5 text-xs" onClick={() => void copyLink()}>
           <Copy size={13} /> Copy link
         </button>
-        <a href={publicUrl} target="_blank" rel="noreferrer" className="btn-secondary !py-1.5 text-xs">
-          <ExternalLink size={13} /> Open
-        </a>
+        <button className="btn-secondary !py-1.5 text-xs" onClick={() => setShareOpen(true)}>
+          <Settings2 size={13} /> Open
+        </button>
         {tab === 'builder' && (
           <button
             className="btn-primary !py-1.5 text-xs"
@@ -136,11 +157,24 @@ export default function FormBuilderPage() {
       {tab === 'builder' ? (
         <div className="mt-6 grid grid-cols-2 gap-8 max-lg:grid-cols-1">
           <FieldEditor fields={fields} onChange={updateFields} />
-          <FormPreview name={form.name} description={form.description} fields={fields} />
+          <FormPreview
+            name={form.name}
+            description={form.description}
+            fields={fields}
+            workspaceName={workspace?.name ?? 'Workspace'}
+          />
         </div>
       ) : (
         <SubmissionsTable formId={form.id} />
       )}
+
+      <FormSharePanel
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        publicToken={form.public_token}
+        formName={form.name}
+        isActive={form.is_active}
+      />
     </div>
   )
 }
@@ -168,7 +202,7 @@ function FieldEditor({ fields, onChange }: { fields: FormField[]; onChange: (f: 
         type,
         label: FIELD_TYPES.find((t) => t.type === type)?.label ?? 'Field',
         required: false,
-        ...(type === 'select' ? { options: ['Option 1', 'Option 2'] } : {}),
+        ...(OPTIONS_FIELD_TYPES.includes(type) ? { options: defaultOptions() } : {}),
       },
     ])
   }
@@ -185,33 +219,40 @@ function FieldEditor({ fields, onChange }: { fields: FormField[]; onChange: (f: 
                 value={field.label}
                 onChange={(e) => update(index, { label: e.target.value })}
               />
-              <select
-                className="rounded-lg border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs text-fg-secondary outline-none disabled:opacity-50"
-                value={field.type}
-                disabled={index === 0}
-                onChange={(e) => {
-                  const type = e.target.value as FormFieldType
-                  update(index, {
-                    type,
-                    options: type === 'select' ? field.options ?? ['Option 1', 'Option 2'] : undefined,
-                  })
-                }}
-              >
-                {FIELD_TYPES.map((t) => (
-                  <option key={t.type} value={t.type}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
+              {field.type === 'checklist' ? (
+                <span className="shrink-0 rounded-lg border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs text-fg-muted">
+                  Checkbox
+                </span>
+              ) : (
+                <select
+                  className="rounded-lg border border-ink-700 bg-ink-800 px-2 py-1.5 text-xs text-fg-secondary outline-none disabled:opacity-50"
+                  value={field.type}
+                  disabled={index === 0}
+                  onChange={(e) => {
+                    const type = e.target.value as FormFieldType
+                    update(index, {
+                      type,
+                      options: OPTIONS_FIELD_TYPES.includes(type)
+                        ? field.options?.length
+                          ? field.options
+                          : defaultOptions()
+                        : undefined,
+                    })
+                  }}
+                >
+                  {FIELD_TYPES.filter((t) => t.type !== 'checklist').map((t) => (
+                    <option key={t.type} value={t.type}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
-            {field.type === 'select' && (
-              <input
-                className="mt-2 w-full rounded-lg border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-xs text-fg outline-none focus:border-brand"
-                placeholder="Options, comma separated"
-                value={(field.options ?? []).join(', ')}
-                onChange={(e) =>
-                  update(index, { options: e.target.value.split(',').map((o) => o.trim()).filter(Boolean) })
-                }
+            {OPTIONS_FIELD_TYPES.includes(field.type) && (
+              <FieldOptionsEditor
+                key={`${field.id}-${field.type}`}
+                options={field.options ?? defaultOptions()}
+                onChange={(options) => update(index, { options })}
               />
             )}
             <div className="mt-2.5 flex items-center gap-3">
@@ -257,68 +298,45 @@ function FieldEditor({ fields, onChange }: { fields: FormField[]; onChange: (f: 
   )
 }
 
-export function FormFieldsRenderer({
+function FormPreview({
+  name,
+  description,
   fields,
-  values,
-  onChange,
-  light,
+  workspaceName,
 }: {
+  name: string
+  description: string | null
   fields: FormField[]
-  values: Record<string, string>
-  onChange: (id: string, value: string) => void
-  light?: boolean
+  workspaceName: string
 }) {
-  const inputCls = light
-    ? 'w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-brand focus:ring-2 focus:ring-brand/20'
-    : 'input-dark'
-  const labelCls = light ? 'mb-1.5 block text-sm font-medium text-gray-800' : 'mb-1.5 block text-xs font-medium text-fg-secondary'
-  return (
-    <div className="space-y-4">
-      {fields.map((field) => (
-        <div key={field.id}>
-          <label className={labelCls}>
-            {field.label}
-            {field.required && <span className="text-red-400"> *</span>}
-          </label>
-          {field.type === 'textarea' ? (
-            <textarea rows={4} className={cn(inputCls, 'resize-y')} value={values[field.id] ?? ''} onChange={(e) => onChange(field.id, e.target.value)} />
-          ) : field.type === 'select' ? (
-            <select className={inputCls} value={values[field.id] ?? ''} onChange={(e) => onChange(field.id, e.target.value)}>
-              <option value="">Select…</option>
-              {(field.options ?? []).map((o) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              type={field.type === 'date' ? 'date' : field.type === 'email' ? 'email' : 'text'}
-              className={inputCls}
-              value={values[field.id] ?? ''}
-              onChange={(e) => onChange(field.id, e.target.value)}
-            />
-          )}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function FormPreview({ name, description, fields }: { name: string; description: string | null; fields: FormField[] }) {
+  const appTheme = useUIStore((s) => s.theme)
+  const isDark = appTheme === 'dark'
   const [values, setValues] = useState<Record<string, string>>({})
+  const [email, setEmail] = useState('')
+
+  const card = (
+    <FormPublicFillCard
+      workspaceName={workspaceName}
+      name={name}
+      description={description}
+      fields={fields}
+      values={values}
+      onChange={(id, v) => setValues((prev) => ({ ...prev, [id]: v }))}
+      email={email}
+      onEmailChange={setEmail}
+      preview
+      theme={isDark ? 'dark' : 'light'}
+      compact
+      embedded
+    />
+  )
+
   return (
     <div>
       <h2 className="mb-3 text-sm font-semibold text-fg">Live preview</h2>
       <div className="rounded-2xl border border-ink-700 bg-ink-850/60 p-6">
-        <h3 className="text-lg font-bold text-fg">{name}</h3>
-        {description && <p className="mt-1 text-sm text-fg-secondary">{description}</p>}
-        <div className="mt-5">
-          <FormFieldsRenderer fields={fields} values={values} onChange={(id, v) => setValues((prev) => ({ ...prev, [id]: v }))} />
-        </div>
-        <button className="btn-primary mt-5 w-full" disabled>
-          Submit (preview)
-        </button>
+        {card}
+        <FormPublicPoweredBy theme={isDark ? 'dark' : 'light'} className="mt-4 text-center" />
       </div>
     </div>
   )

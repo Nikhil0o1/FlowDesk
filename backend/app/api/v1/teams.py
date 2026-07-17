@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_permissions
 from app.db.session import get_db
 from app.models.organization import OrganizationMember
+from app.models.project import Project, ProjectMember, ProjectTeam, Space, SpaceMember
 from app.models.team import Team, TeamMember
 from app.models.workspace import Workspace, WorkspaceMember
 from app.schemas.common import Message
@@ -55,7 +56,7 @@ def _effective_team_role_for_user(db: Session, team: Team, user_id: uuid.UUID) -
             WorkspaceMember.user_id == user_id,
         )
     )
-    if workspace_role == "owner" or team.created_by == user_id:
+    if workspace_role == "owner":
         return "owner"
     team_role = _team_member_role(db, team.id, user_id)
     if team_role == "admin" or workspace_role == "admin":
@@ -65,6 +66,105 @@ def _effective_team_role_for_user(db: Session, team: Team, user_id: uuid.UUID) -
 
 def _effective_team_role(db: Session, perms: PermissionService, team: Team) -> str | None:
     return _effective_team_role_for_user(db, team, perms.user.id)
+
+
+def _workspace_management_role(db: Session, perms: PermissionService, team: Team) -> str | None:
+    workspace = db.get(Workspace, team.workspace_id)
+    if not workspace:
+        return None
+    if perms._is_org_admin_or_owner(workspace.organization_id):
+        return "owner"
+    workspace_role = perms.workspace_role(team.workspace_id)
+    if workspace_role in ("owner", "admin"):
+        return workspace_role
+    return None
+
+
+def _team_linked_project_ids(db: Session, team_id: uuid.UUID) -> list[uuid.UUID]:
+    return list(
+        db.scalars(
+            select(Project.id)
+            .join(ProjectTeam, ProjectTeam.project_id == Project.id)
+            .where(
+                ProjectTeam.team_id == team_id,
+                Project.deleted_at.is_(None),
+            )
+        ).all()
+    )
+
+
+def _is_workspace_scoped_admin(db: Session, perms: PermissionService, workspace_id: uuid.UUID) -> bool:
+    """Space or project admin anywhere in this workspace."""
+    if db.scalar(
+        select(SpaceMember.id)
+        .join(Space, Space.id == SpaceMember.space_id)
+        .where(
+            Space.workspace_id == workspace_id,
+            Space.deleted_at.is_(None),
+            SpaceMember.user_id == perms.user.id,
+            SpaceMember.role == "admin",
+        )
+        .limit(1)
+    ):
+        return True
+    return (
+        db.scalar(
+            select(ProjectMember.id)
+            .join(Project, Project.id == ProjectMember.project_id)
+            .where(
+                Project.workspace_id == workspace_id,
+                Project.deleted_at.is_(None),
+                ProjectMember.user_id == perms.user.id,
+                ProjectMember.role == "admin",
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def _can_create_team(db: Session, perms: PermissionService, workspace_id: uuid.UUID) -> bool:
+    workspace = db.get(Workspace, workspace_id)
+    if not workspace or workspace.deleted_at is not None:
+        return False
+    if perms._is_org_admin_or_owner(workspace.organization_id):
+        return True
+    if perms.workspace_role(workspace_id) in ("admin", "owner"):
+        return True
+    return _is_workspace_scoped_admin(db, perms, workspace_id)
+
+
+def _require_can_create_team(db: Session, perms: PermissionService, workspace_id: uuid.UUID) -> None:
+    if not _can_create_team(db, perms, workspace_id):
+        raise PermissionError403("Insufficient permissions to create teams in this workspace")
+
+
+def _can_manage_team(db: Session, perms: PermissionService, team: Team) -> bool:
+    """Edit/delete a team and manage its members. Org owner/admin and workspace admins
+    manage any team. A space/project admin manages teams they created or that are
+    assigned to a project they administer. Plain members and viewers can only view."""
+    if _workspace_management_role(db, perms, team) in ("owner", "admin"):
+        return True
+    if not _is_workspace_scoped_admin(db, perms, team.workspace_id):
+        return False
+    if team.created_by == perms.user.id:
+        return True
+    for project_id in _team_linked_project_ids(db, team.id):
+        try:
+            perms.require_project_admin(project_id)
+            return True
+        except PermissionError403:
+            continue
+    return False
+
+
+def _can_delete_team(db: Session, perms: PermissionService, team: Team) -> bool:
+    return _can_manage_team(db, perms, team)
+
+
+def _require_can_delete_team(db: Session, perms: PermissionService, team: Team) -> None:
+    if not _can_delete_team(db, perms, team):
+        raise PermissionError403("Insufficient permissions to delete this team")
 
 
 def _team_out(db: Session, perms: PermissionService, team: Team) -> TeamOut:
@@ -83,7 +183,9 @@ def _team_out(db: Session, perms: PermissionService, team: Team) -> TeamOut:
         detail.user = briefs.get(member.user_id)
         out.member_details.append(detail)
     out.my_role = _effective_team_role(db, perms, team)
-    out.can_manage_members = out.my_role in ("owner", "admin")
+    out.can_manage_members = _can_manage_team(db, perms, team)
+    out.can_delete = _can_delete_team(db, perms, team)
+    out.can_create_teams = _can_create_team(db, perms, team.workspace_id)
     return out
 
 
@@ -96,10 +198,10 @@ def _get_team(db: Session, perms: PermissionService, team_id: uuid.UUID) -> Team
 
 
 def _require_team_manager(db: Session, perms: PermissionService, team: Team) -> None:
-    """Team owner/admin, workspace admin/owner, or org owner can manage the team."""
-    if _effective_team_role(db, perms, team) in ("owner", "admin"):
-        return
-    raise PermissionError403("Team admin access required")
+    """Org owner/admin, workspace admin, or a space/project admin in the workspace
+    may edit a team and its membership."""
+    if not _can_manage_team(db, perms, team):
+        raise PermissionError403("Insufficient permissions to manage this team")
 
 
 def _require_can_manage_team_member(
@@ -109,10 +211,13 @@ def _require_can_manage_team_member(
     member_user_id: uuid.UUID,
     new_role: str | None = None,
 ) -> None:
-    actor_role = _effective_team_role(db, perms, team)
+    if not _can_manage_team(db, perms, team):
+        raise PermissionError403("Insufficient permissions to manage team members")
+    actor_role = _workspace_management_role(db, perms, team)
     if actor_role not in ("owner", "admin"):
-        raise PermissionError403("Team admin access required")
-    if member_user_id == perms.user.id:
+        # Space/project admins (and team creators) manage members at "admin" level.
+        actor_role = "admin"
+    if str(member_user_id) == str(perms.user.id):
         raise PermissionError403("You cannot manage your own team role or membership")
     target_role = _effective_team_role_for_user(db, team, member_user_id)
     if actor_role == "owner":
@@ -124,8 +229,6 @@ def _require_can_manage_team_member(
     target_team_role = _team_member_role(db, team.id, member_user_id)
     if target_team_role not in ("admin", "member"):
         raise PermissionError403("Team admins can only manage admins and members")
-    if new_role is None and target_role != "member":
-        raise PermissionError403("Team admins can only remove members")
 
 
 @router.get("/workspaces/{workspace_id}/teams", response_model=list[TeamOut])
@@ -150,7 +253,8 @@ def create_team(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    perms.require_workspace_admin(workspace_id)
+    perms.require_workspace_member(workspace_id)
+    _require_can_create_team(db, perms, workspace_id)
     team = Team(
         workspace_id=workspace_id,
         name=body.name,
@@ -209,8 +313,7 @@ def delete_team(
     perms: PermissionService = Depends(get_permissions),
 ):
     team = _get_team(db, perms, team_id)
-    if _effective_team_role(db, perms, team) != "owner":
-        raise PermissionError403("Team owner access required")
+    _require_can_delete_team(db, perms, team)
     team.deleted_at = datetime.now(timezone.utc)
     log_activity(db, workspace_id=team.workspace_id, action="team.deleted",
                  actor_id=perms.user.id, data={"name": team.name})

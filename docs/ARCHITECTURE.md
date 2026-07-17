@@ -89,7 +89,7 @@ Resolution rules implemented in `PermissionService`:
 
 `core/websocket.py` implements a room-based `ConnectionManager`:
 
-- On connect (`/api/v1/ws?token=<JWT>`), the user's accessible rooms are computed from memberships: `user:{id}`, `workspace:{id}`, `project:{id}`, `channel:{id}`. **You only ever receive events for rooms you were entitled to at connect time** (chat channels created later can be joined via a verified `subscribe.channel` message).
+- On connect (`POST /api/v1/ws/ticket` then `/api/v1/ws?ticket=…`), the user's accessible rooms are computed from memberships: `user:{id}`, `workspace:{id}`, `project:{id}`, `channel:{id}`. **You only ever receive events for rooms you were entitled to at connect time** (chat channels created later can be joined via a verified `subscribe.channel` or `subscribe` message). External SaaS use `/api/v1/integrations/ws` with a PAT that has `realtime:read`.
 - Event envelope: `{"type": "task.updated", "workspace_id": …, "project_id": …, "task_id": …, "payload": {…}}`.
 - Sync REST handlers emit through `emit()` → `run_coroutine_threadsafe` onto the server loop.
 - Presence: first socket per user broadcasts `presence.online` to their workspaces; last close broadcasts `presence.offline`; new sockets receive a `presence.state` snapshot.

@@ -3,6 +3,7 @@ import { Building2, Plus, Power, Search } from 'lucide-react'
 import { useState } from 'react'
 
 import { api, errorMessage } from '../../lib/api'
+import { INVITE_EMAIL_ERROR, isValidInviteEmail } from '../../lib/emailValidation'
 import type { OrgMetadata, Page } from '../../lib/types'
 import { cn, formatDate } from '../../lib/utils'
 import { toast } from '../../stores/toast'
@@ -63,32 +64,28 @@ export default function OrganizationsAdminPage() {
         <EmptyState icon={Building2} title="No organizations" description="Create one and invite its owner." />
       ) : (
         <div className="mt-5 overflow-hidden rounded-xl border border-ink-700">
-          <div className="grid grid-cols-[1fr_90px_90px_90px_90px_110px_90px] gap-2 border-b border-ink-700 bg-ink-850 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-fg-muted">
+          <div className="grid grid-cols-[1fr_90px_90px_90px_90px_90px] gap-2 border-b border-ink-700 bg-ink-850 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-fg-muted">
             <span>Organization</span>
             <span>Members</span>
             <span>Workspaces</span>
             <span>Projects</span>
             <span>Tasks</span>
-            <span>Plan</span>
             <span>Status</span>
           </div>
           {data!.items.map((org) => (
-            <div key={org.id} className="grid grid-cols-[1fr_90px_90px_90px_90px_110px_90px] items-center gap-2 border-b border-ink-700/60 bg-ink-900 px-4 py-2.5 last:border-b-0">
+            <div key={org.id} className="grid grid-cols-[1fr_90px_90px_90px_90px_90px] items-center gap-2 border-b border-ink-700/60 bg-ink-900 px-4 py-2.5 last:border-b-0">
               <div className="min-w-0">
                 <p className={cn('truncate text-sm font-medium', org.is_disabled ? 'text-fg-muted line-through' : 'text-fg')}>
                   {org.name}
                 </p>
                 <p className="text-[11px] text-fg-muted">
-                  {org.slug} · created {formatDate(org.created_at)}
+                  created {formatDate(org.created_at)}
                 </p>
               </div>
               <span className="text-sm text-fg-secondary">{org.member_count}</span>
               <span className="text-sm text-fg-secondary">{org.workspace_count}</span>
               <span className="text-sm text-fg-secondary">{org.project_count}</span>
               <span className="text-sm text-fg-secondary">{org.task_count}</span>
-              <span className="text-xs text-fg-secondary">
-                {org.plan} · {org.seats} seats
-              </span>
               <button
                 onClick={() => toggle.mutate({ id: org.id, disable: !org.is_disabled })}
                 className={cn(
@@ -114,24 +111,44 @@ export default function OrganizationsAdminPage() {
 function CreateOrgModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
-  const [slug, setSlug] = useState('')
   const [ownerEmail, setOwnerEmail] = useState('')
+  const [emailBlurred, setEmailBlurred] = useState(false)
+  const [submitAttempted, setSubmitAttempted] = useState(false)
   const [creating, setCreating] = useState(false)
 
+  const trimmedEmail = ownerEmail.trim()
+  const emailInvalid = trimmedEmail.length > 0 && !isValidInviteEmail(trimmedEmail)
+  const domainPart = trimmedEmail.split('@')[1] ?? ''
+  const domainLooksComplete = domainPart.includes('.')
+  const emailError =
+    emailInvalid && (emailBlurred || submitAttempted || domainLooksComplete)
+      ? INVITE_EMAIL_ERROR
+      : null
+  const canSubmit =
+    name.trim().length >= 2 && !!trimmedEmail && isValidInviteEmail(trimmedEmail) && !creating
+
+  const handleClose = () => {
+    setName('')
+    setOwnerEmail('')
+    setEmailBlurred(false)
+    setSubmitAttempted(false)
+    onClose()
+  }
+
   const create = async () => {
+    if (!trimmedEmail || !isValidInviteEmail(trimmedEmail)) {
+      setSubmitAttempted(true)
+      return
+    }
     setCreating(true)
     try {
       await api.post('/admin/organizations', {
         name: name.trim(),
-        slug: slug.trim(),
-        owner_email: ownerEmail.trim(),
+        owner_email: trimmedEmail,
       })
-      toast.success(`Organization created — onboarding email sent to ${ownerEmail.trim()}`)
+      toast.success(`Organization created — onboarding email sent to ${trimmedEmail}`)
       void queryClient.invalidateQueries({ queryKey: ['admin-orgs'] })
-      setName('')
-      setSlug('')
-      setOwnerEmail('')
-      onClose()
+      handleClose()
     } catch (err) {
       toast.error(errorMessage(err))
     } finally {
@@ -139,30 +156,42 @@ function CreateOrgModal({ open, onClose }: { open: boolean; onClose: () => void 
     }
   }
 
-  const autoSlug = (value: string) =>
-    value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
-
   return (
-    <Modal open={open} onClose={onClose} title="Create organization" width="max-w-md">
+    <Modal open={open} onClose={handleClose} title="Create organization" width="max-w-md">
       <div className="space-y-3">
-        <input
-          className="input-dark"
-          placeholder="Organization name"
-          value={name}
-          onChange={(e) => {
-            setName(e.target.value)
-            if (!slug || slug === autoSlug(name)) setSlug(autoSlug(e.target.value))
-          }}
-          autoFocus
-        />
-        <input className="input-dark" placeholder="slug (e.g. acme)" value={slug} onChange={(e) => setSlug(autoSlug(e.target.value))} />
-        <input className="input-dark" type="email" placeholder="Owner email (gets onboarding invite)" value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)} />
+        <div>
+          <label className="mb-1 block text-xs font-medium text-fg-secondary">
+            Organization name <span className="text-red-400">*</span>
+          </label>
+          <input
+            className="input-dark"
+            placeholder="e.g. Acme Corp"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-fg-secondary">
+            Owner email <span className="text-red-400">*</span>
+          </label>
+          <input
+            className={cn('input-dark', emailError && 'border-red-500/50')}
+            type="email"
+            placeholder="owner@example.com"
+            value={ownerEmail}
+            onChange={(e) => setOwnerEmail(e.target.value)}
+            onBlur={() => setEmailBlurred(true)}
+            aria-invalid={emailError ? true : undefined}
+          />
+          {emailError && <p className="mt-1.5 text-xs text-red-400">{emailError}</p>}
+        </div>
         <p className="text-xs text-fg-muted">
           The owner receives an onboarding email with a secure activation link (expires in 48h).
         </p>
         <button
           className="btn-primary w-full"
-          disabled={creating || !name.trim() || slug.length < 2 || !ownerEmail.includes('@')}
+          disabled={!canSubmit}
           onClick={create}
         >
           {creating ? 'Creating…' : 'Create & send invite'}

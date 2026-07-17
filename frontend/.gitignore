@@ -1,29 +1,24 @@
-# ---- Environment / secrets ----
+node_modules
+dist
+dist-ssr
+coverage
+*.local
+*.tsbuildinfo
+
+# Environment files — never commit secrets
 .env
 .env.*
 !.env.example
 
-# ---- Dependencies ----
-node_modules/
+# Security scan output (local gitleaks / snyk / trufflehog)
+security-reports/
+snyk-report.json
+snyk-code-report.json
+gitleaks-report.json
+trufflehog-report.json
 
-# ---- Build output ----
-dist/
-dist-ssr/
-.vite/
-*.tsbuildinfo
-
-# ---- Logs ----
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# ---- Vercel ----
-.vercel/
-
-# ---- IDE / OS ----
-.vscode/
-.idea/
-*.swp
-.DS_Store
-Thumbs.db
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/

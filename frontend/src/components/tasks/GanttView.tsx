@@ -7,24 +7,34 @@ import { api, errorMessage } from '../../lib/api'
 import type { Task } from '../../lib/types'
 import { addDays, cn, daysBetween, isoWeek, startOfWeek, toDateKey } from '../../lib/utils'
 import { toast } from '../../stores/toast'
+import { NoDueDateDot } from './NoDueDateDot'
+import { StatusIcon } from '../ui/badges'
 
-const DAY_WIDTH = 42
 const ROW_HEIGHT = 40
-const TOTAL_DAYS = 35 // 5 weeks
+
+type Zoom = 'day' | 'week'
+const ZOOM: Record<Zoom, { dayWidth: number; totalDays: number }> = {
+  day: { dayWidth: 64, totalDays: 28 },
+  week: { dayWidth: 38, totalDays: 56 },
+}
 
 interface GanttViewProps {
   projectId: string
   projectName: string
   tasks: Task[]
   canEdit: boolean
+  createGithubIssue?: boolean
 }
 
-export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewProps) {
+export function GanttView({ projectId, projectName, tasks, canEdit, createGithubIssue = false }: GanttViewProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [adding, setAdding] = useState(false)
   const [title, setTitle] = useState('')
+  const [zoom, setZoom] = useState<Zoom>('week')
   const [scrollKey, setScrollKey] = useState(0) // bump to re-anchor on "Today"
+
+  const { dayWidth: DAY_WIDTH, totalDays: TOTAL_DAYS } = ZOOM[zoom]
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -43,7 +53,11 @@ export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewP
   }
 
   const create = useMutation({
-    mutationFn: () => api.post<Task>(`/projects/${projectId}/tasks`, { title: title.trim() }),
+    mutationFn: () =>
+      api.post<Task>(`/projects/${projectId}/tasks`, {
+        title: title.trim(),
+        create_github_issue: createGithubIssue,
+      }),
     onSuccess: () => {
       setTitle('')
       setAdding(false)
@@ -60,11 +74,22 @@ export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewP
         <button className="btn-secondary !py-1.5 text-xs" onClick={() => setScrollKey((k) => k + 1)}>
           Today
         </button>
-        <span className="rounded-lg border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-xs font-medium text-fg-secondary">
-          Week
-        </span>
+        <div className="flex items-center rounded-lg border border-ink-700 bg-ink-800 p-0.5">
+          {(['day', 'week'] as Zoom[]).map((z) => (
+            <button
+              key={z}
+              onClick={() => setZoom(z)}
+              className={cn(
+                'rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors',
+                zoom === z ? 'bg-ink-700 text-fg' : 'text-fg-muted hover:text-fg',
+              )}
+            >
+              {z}
+            </button>
+          ))}
+        </div>
         <span className="text-xs text-fg-muted">
-          Bars need a start &amp; due date — tasks without dates show a dot.
+          Set due dates from the task list or table view.
         </span>
       </div>
 
@@ -79,6 +104,7 @@ export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewP
               <ChevronDown size={13} className="text-fg-muted" />
               <List size={14} className="text-brand" />
               <span className="truncate text-sm font-semibold text-fg">{projectName}</span>
+              <span className="ml-auto text-[11px] text-fg-muted">{tasks.length}</span>
             </div>
             {tasks.map((task) => (
               <button
@@ -87,11 +113,9 @@ export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewP
                 className="flex w-full items-center gap-2 border-b border-ink-700/60 px-3 pl-9 text-left transition-colors hover:bg-ink-850"
                 style={{ height: ROW_HEIGHT }}
               >
-                <span
-                  className="h-3 w-3 shrink-0 rounded-full border-2 border-dashed"
-                  style={{ borderColor: task.status?.color ?? '#87909E' }}
-                />
-                <span className={cn('truncate text-sm', task.completed_at ? 'text-fg-muted line-through' : 'text-fg')}>
+                <StatusIcon category={task.status?.category} color={task.status?.color ?? '#87909E'} size={13} />
+                {!task.due_date && <NoDueDateDot title={task.title} size="sm" />}
+                <span className="truncate text-sm text-fg">
                   {task.title}
                 </span>
               </button>
@@ -152,8 +176,7 @@ export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewP
                     {day.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 2)}
                     <span
                       className={cn(
-                        isToday &&
-                          'flex h-4 w-4 items-center justify-center rounded-full bg-red-500 font-bold text-white',
+                        isToday && 'flex h-4 w-4 items-center justify-center rounded-full bg-red-500 font-bold text-white',
                       )}
                     >
                       {day.getDate()}
@@ -196,7 +219,13 @@ export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewP
 
               {/* Task rows */}
               {tasks.map((task) => (
-                <GanttRow key={task.id} task={task} rangeStart={rangeStart} onOpen={() => navigate(`/app/tasks/${task.id}`)} />
+                <GanttRow
+                  key={task.id}
+                  task={task}
+                  rangeStart={rangeStart}
+                  dayWidth={DAY_WIDTH}
+                  onOpen={() => navigate(`/app/tasks/${task.id}`)}
+                />
               ))}
               {canEdit && <div style={{ height: ROW_HEIGHT }} />}
             </div>
@@ -207,28 +236,46 @@ export function GanttView({ projectId, projectName, tasks, canEdit }: GanttViewP
   )
 }
 
-function GanttRow({ task, rangeStart, onOpen }: { task: Task; rangeStart: Date; onOpen: () => void }) {
-  const color = task.status?.color ?? '#8C5BFF'
+function GanttRow({
+  task,
+  rangeStart,
+  dayWidth,
+  onOpen,
+}: {
+  task: Task
+  rangeStart: Date
+  dayWidth: number
+  onOpen: () => void
+}) {
+  const color = task.status?.color ?? '#2B88EE'
+  const done = !!task.completed_at
+  const progress = task.subtask_count > 0 ? task.subtask_done_count / task.subtask_count : done ? 1 : 0
 
   let bar: React.ReactNode = null
   const start = task.start_date ? new Date(task.start_date + 'T00:00:00') : null
   const due = task.due_date ? new Date(task.due_date + 'T00:00:00') : null
 
   if (start && due && due >= start) {
-    const left = daysBetween(rangeStart, start) * DAY_WIDTH + 3
-    const width = (daysBetween(start, due) + 1) * DAY_WIDTH - 6
+    const left = daysBetween(rangeStart, start) * dayWidth + 3
+    const width = (daysBetween(start, due) + 1) * dayWidth - 6
     bar = (
       <button
         onClick={onOpen}
-        className="absolute top-2 flex h-6 items-center truncate rounded-md px-2 text-left text-[11px] font-medium text-white transition-transform hover:scale-y-105"
-        style={{ left, width: Math.max(width, 20), backgroundColor: color }}
+        className={cn(
+          'group/bar absolute top-2 flex h-6 items-center overflow-hidden rounded-md text-left text-[11px] font-medium text-white shadow-sm transition-transform hover:scale-y-110',
+          done && 'opacity-70',
+        )}
+        style={{ left, width: Math.max(width, 20), backgroundColor: `${color}66`, border: `1px solid ${color}` }}
         title={task.title}
       >
-        <span className="truncate">{task.title}</span>
+        {progress > 0 && (
+          <span className="absolute inset-y-0 left-0" style={{ width: `${progress * 100}%`, backgroundColor: color }} />
+        )}
+        <span className="relative z-10 truncate px-2">{task.title}</span>
       </button>
     )
   } else if (due) {
-    const left = daysBetween(rangeStart, due) * DAY_WIDTH + DAY_WIDTH / 2 - 5
+    const left = daysBetween(rangeStart, due) * dayWidth + dayWidth / 2 - 5
     bar = (
       <button
         onClick={onOpen}
@@ -238,13 +285,7 @@ function GanttRow({ task, rangeStart, onOpen }: { task: Task; rangeStart: Date; 
       />
     )
   } else {
-    bar = (
-      <button
-        onClick={onOpen}
-        className="absolute left-2 top-4 h-2 w-2 rounded-full bg-amber-400 transition-transform hover:scale-125"
-        title={`${task.title} — no dates set`}
-      />
-    )
+    bar = null
   }
 
   return (

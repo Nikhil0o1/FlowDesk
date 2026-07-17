@@ -28,6 +28,7 @@ class ChannelOut(ORMModel):
     description: str | None = None
     is_private: bool
     is_direct: bool
+    is_general: bool = False
     created_at: datetime
     member_count: int = 0
     unread_count: int = 0
@@ -45,9 +46,26 @@ class ChatMemberAdd(BaseModel):
     user_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
 
 
+class ChatAttachmentOut(ORMModel):
+    id: uuid.UUID
+    channel_id: uuid.UUID
+    message_id: uuid.UUID | None = None
+    file_name: str
+    mime_type: str
+    size_bytes: int
+    created_at: datetime
+
+
 class MessageCreate(BaseModel):
-    body: str = Field(min_length=1, max_length=10000)
+    # Empty body is allowed when the message carries attachments.
+    body: str = Field(default="", max_length=10000)
     parent_message_id: uuid.UUID | None = None
+    client_message_id: uuid.UUID | None = None
+    attachment_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
+
+
+class MessageUpdate(BaseModel):
+    body: str = Field(min_length=1, max_length=10000)
 
 
 class MessageOut(ORMModel):
@@ -59,6 +77,7 @@ class MessageOut(ORMModel):
     edited_at: datetime | None = None
     created_at: datetime
     author: UserBrief | None = None
+    attachments: list[ChatAttachmentOut] = Field(default_factory=list)
 
 
 class MarkReadRequest(BaseModel):

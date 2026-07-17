@@ -14,6 +14,7 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # ---- Node / frontend ----
@@ -48,3 +49,6 @@ desktop.ini
 # ---- Misc ----
 *.bak
 *.tmp
+
+# Local reference copy of Holocron (read-only; not part of FlowDesk)
+Holocron/

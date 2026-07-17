@@ -7,24 +7,33 @@ import { api, errorMessage } from '../../lib/api'
 import type { Task } from '../../lib/types'
 import { addDays, cn, startOfWeek, toDateKey } from '../../lib/utils'
 import { toast } from '../../stores/toast'
+import { PriorityFlag, StatusIcon } from '../ui/badges'
+import { AvatarStack } from '../ui/Avatar'
 
-const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+type Mode = 'month' | 'week'
 
 interface CalendarViewProps {
   projectId: string
   tasks: Task[]
   canEdit: boolean
+  createGithubIssue?: boolean
 }
 
-export function CalendarView({ projectId, tasks, canEdit }: CalendarViewProps) {
+export function CalendarView({ projectId, tasks, canEdit, createGithubIssue = false }: CalendarViewProps) {
   const today = new Date()
-  const [monthAnchor, setMonthAnchor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1))
+  const [mode, setMode] = useState<Mode>('month')
+  const [anchor, setAnchor] = useState<Date>(() => new Date(today.getFullYear(), today.getMonth(), today.getDate()))
   const [quickCreateDay, setQuickCreateDay] = useState<string | null>(null)
   const navigate = useNavigate()
 
-  const gridStart = startOfWeek(monthAnchor)
-  const days: Date[] = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i))
   const todayKey = toDateKey(today)
+  const isMonth = mode === 'month'
+
+  const gridStart = isMonth ? startOfWeek(new Date(anchor.getFullYear(), anchor.getMonth(), 1)) : startOfWeek(anchor)
+  const dayCount = isMonth ? 42 : 7
+  const days: Date[] = Array.from({ length: dayCount }, (_, i) => addDays(gridStart, i))
 
   const tasksByDay = new Map<string, Task[]>()
   for (const task of tasks) {
@@ -35,65 +44,88 @@ export function CalendarView({ projectId, tasks, canEdit }: CalendarViewProps) {
   }
   const unscheduled = tasks.filter((t) => !t.due_date).length
 
-  const monthLabel = monthAnchor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+  const label = isMonth
+    ? anchor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+    : `${gridStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${addDays(gridStart, 6).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+
+  const step = (dir: number) => {
+    if (isMonth) setAnchor(new Date(anchor.getFullYear(), anchor.getMonth() + dir, 1))
+    else setAnchor(addDays(anchor, dir * 7))
+  }
+
+  const maxChips = isMonth ? 3 : 8
 
   return (
     <div className="flex h-full flex-col px-6 pb-6">
-      {/* Calendar toolbar */}
+      {/* Toolbar */}
       <div className="flex shrink-0 items-center gap-2 pb-3">
         <button
           className="btn-secondary !py-1.5 text-xs"
-          onClick={() => setMonthAnchor(new Date(today.getFullYear(), today.getMonth(), 1))}
+          onClick={() => setAnchor(new Date(today.getFullYear(), today.getMonth(), today.getDate()))}
         >
           Today
         </button>
-        <span className="rounded-lg border border-ink-700 bg-ink-800 px-2.5 py-1.5 text-xs font-medium text-fg-secondary">
-          Month
-        </span>
-        <button
-          className="btn-ghost !px-1.5"
-          onClick={() => setMonthAnchor(new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() - 1, 1))}
-        >
+        <div className="flex items-center rounded-lg border border-ink-700 bg-ink-800 p-0.5">
+          {(['month', 'week'] as Mode[]).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={cn(
+                'rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors',
+                mode === m ? 'bg-ink-700 text-fg' : 'text-fg-muted hover:text-fg',
+              )}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        <button className="btn-ghost !px-1.5" onClick={() => step(-1)}>
           <ChevronLeft size={15} />
         </button>
-        <button
-          className="btn-ghost !px-1.5"
-          onClick={() => setMonthAnchor(new Date(monthAnchor.getFullYear(), monthAnchor.getMonth() + 1, 1))}
-        >
+        <button className="btn-ghost !px-1.5" onClick={() => step(1)}>
           <ChevronRight size={15} />
         </button>
-        <span className="text-sm font-semibold text-fg">{monthLabel}</span>
+        <span className="text-sm font-semibold text-fg">{label}</span>
         <span className="flex-1" />
-        {unscheduled > 0 && (
-          <span className="text-xs text-fg-muted">{unscheduled} unscheduled</span>
-        )}
+        {unscheduled > 0 && <span className="text-xs text-fg-muted">{unscheduled} unscheduled</span>}
       </div>
 
-      {/* Grid */}
-      <div className="grid shrink-0 grid-cols-7 border-b border-l border-t border-ink-700">
+      {/* Weekday header */}
+      <div className="grid shrink-0 grid-cols-7 overflow-hidden rounded-t-lg border border-ink-800 bg-ink-850">
         {WEEKDAYS.map((day) => (
-          <div key={day} className="border-r border-ink-700 bg-ink-850 px-3 py-2 text-xs font-medium text-fg-secondary">
+          <div
+            key={day}
+            className="border-r border-ink-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-fg-muted last:border-r-0"
+          >
             {day}
           </div>
         ))}
       </div>
-      <div className="grid min-h-0 flex-1 grid-cols-7 grid-rows-6 border-l border-ink-700">
+
+      {/* Grid */}
+      <div
+        className={cn(
+          'grid min-h-0 flex-1 grid-cols-7 overflow-hidden rounded-b-lg border-x border-b border-ink-800',
+          isMonth ? 'grid-rows-6' : 'grid-rows-1',
+        )}
+      >
         {days.map((day) => {
           const key = toDateKey(day)
-          const inMonth = day.getMonth() === monthAnchor.getMonth()
+          const inMonth = !isMonth || day.getMonth() === anchor.getMonth()
           const isToday = key === todayKey
+          const isPast = key < todayKey
           const dayTasks = tasksByDay.get(key) ?? []
           return (
             <div
               key={key}
               className={cn(
-                'group/day relative flex min-h-[88px] flex-col gap-1 overflow-hidden border-b border-r border-ink-700 p-1.5',
-                !inMonth && 'bg-ink-900/60',
+                'group/day relative flex min-h-[96px] flex-col border-b border-r border-ink-800 p-1.5 last:border-r-0',
+                !inMonth && 'bg-ink-900/50',
                 isToday && 'bg-brand-soft/40',
               )}
             >
-              <div className="flex items-center justify-between">
-                {canEdit ? (
+              <div className="mb-1 flex items-center justify-between">
+                {canEdit && !isPast ? (
                   <button
                     className="rounded p-0.5 text-fg-muted opacity-0 transition-opacity hover:bg-ink-750 hover:text-fg group-hover/day:opacity-100"
                     title="Add task"
@@ -110,7 +142,7 @@ export function CalendarView({ projectId, tasks, canEdit }: CalendarViewProps) {
                     isToday
                       ? 'flex h-5 w-5 items-center justify-center rounded-full bg-brand font-bold text-white'
                       : inMonth
-                        ? 'text-fg-secondary'
+                        ? 'font-medium text-fg-secondary'
                         : 'text-fg-muted',
                   )}
                 >
@@ -119,24 +151,27 @@ export function CalendarView({ projectId, tasks, canEdit }: CalendarViewProps) {
               </div>
 
               <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
-                {dayTasks.slice(0, 4).map((task) => (
-                  <button
-                    key={task.id}
-                    onClick={() => navigate(`/app/tasks/${task.id}`)}
-                    className="flex w-full items-center gap-1.5 rounded-md border border-ink-700 bg-ink-800 px-1.5 py-1 text-left transition-colors hover:border-ink-600"
-                    title={task.title}
-                  >
-                    <span
-                      className="h-1.5 w-1.5 shrink-0 rounded-full"
-                      style={{ backgroundColor: task.status?.color ?? '#87909E' }}
-                    />
-                    <span className={cn('truncate text-[11px]', task.completed_at ? 'text-fg-muted line-through' : 'text-fg')}>
-                      {task.title}
-                    </span>
-                  </button>
-                ))}
-                {dayTasks.length > 4 && (
-                  <p className="px-1 text-[10px] text-fg-muted">+{dayTasks.length - 4} more</p>
+                {dayTasks.slice(0, maxChips).map((task) => {
+                  const color = task.status?.color ?? '#87909E'
+                  return (
+                    <button
+                      key={task.id}
+                      onClick={() => navigate(`/app/tasks/${task.id}`)}
+                      className="flex w-full items-center gap-1.5 rounded-md py-1 pl-1.5 pr-1 text-left transition-all hover:brightness-125"
+                      style={{ backgroundColor: `${color}24`, boxShadow: `inset 2px 0 0 ${color}` }}
+                      title={task.title}
+                    >
+                      <StatusIcon category={task.status?.category} color={color} size={11} />
+                      <span className="flex-1 truncate text-[11px] text-fg">
+                        {task.title}
+                      </span>
+                      {task.priority && <PriorityFlag priority={task.priority} />}
+                      {task.assignees.length > 0 && <AvatarStack users={task.assignees} size={16} max={2} />}
+                    </button>
+                  )
+                })}
+                {dayTasks.length > maxChips && (
+                  <p className="px-1 text-[10px] font-medium text-fg-muted">+{dayTasks.length - maxChips} more</p>
                 )}
               </div>
 
@@ -144,6 +179,7 @@ export function CalendarView({ projectId, tasks, canEdit }: CalendarViewProps) {
                 <QuickCreatePopover
                   projectId={projectId}
                   dateKey={key}
+                  createGithubIssue={createGithubIssue}
                   onClose={() => setQuickCreateDay(null)}
                 />
               )}
@@ -158,10 +194,12 @@ export function CalendarView({ projectId, tasks, canEdit }: CalendarViewProps) {
 function QuickCreatePopover({
   projectId,
   dateKey,
+  createGithubIssue = false,
   onClose,
 }: {
   projectId: string
   dateKey: string
+  createGithubIssue?: boolean
   onClose: () => void
 }) {
   const [title, setTitle] = useState('')
@@ -169,7 +207,11 @@ function QuickCreatePopover({
 
   const create = useMutation({
     mutationFn: () =>
-      api.post<Task>(`/projects/${projectId}/tasks`, { title: title.trim(), due_date: dateKey }),
+      api.post<Task>(`/projects/${projectId}/tasks`, {
+        title: title.trim(),
+        due_date: dateKey,
+        create_github_issue: createGithubIssue,
+      }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['tasks'] })
       onClose()

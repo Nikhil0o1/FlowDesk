@@ -1,38 +1,51 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import { activateInvite, api, errorMessage } from '../../lib/api'
+import { readAuthTokenFromUrl } from '../../lib/fragmentToken'
+import { DEFAULT_LOGIN_LANDING, syncLoginWorkspaceStore } from '../../lib/loginRouting'
 import type { InvitePreview } from '../../lib/types'
 import { useAuthStore } from '../../stores/auth'
 import { AuthLogo, AuthShell } from './AuthShell'
 
 export default function ActivateInvitePage() {
+  const { token: pathToken } = useParams<{ token?: string }>()
   const [params] = useSearchParams()
   const navigate = useNavigate()
-  const token = params.get('token') ?? ''
+  const token = useMemo(
+    () => readAuthTokenFromUrl(pathToken) ?? '',
+    [pathToken],
+  )
+  useEffect(() => {
+    if (token) window.history.replaceState(null, '', '/activate-invite')
+  }, [token])
+  // In-app notifications carry the invite id instead of the raw token; previewing
+  // and accepting by id use the authenticated, email-matched endpoints.
+  const inviteId = params.get('invite') ?? ''
   const user = useAuthStore((s) => s.user)
 
   const [fullName, setFullName] = useState('')
-  const [password, setPassword] = useState('')
-  const [confirm, setConfirm] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   const preview = useQuery({
-    queryKey: ['invite-preview', token],
-    queryFn: () => api.get<InvitePreview>(`/auth/invite-preview?token=${encodeURIComponent(token)}`),
-    enabled: !!token,
+    queryKey: ['invite-preview', inviteId ? `id:${inviteId}` : token],
+    queryFn: () =>
+      inviteId
+        ? api.get<InvitePreview>(`/auth/invites/${inviteId}`)
+        : api.post<InvitePreview>('/auth/invite-preview', { token }),
+    enabled: !!token || !!inviteId,
     retry: false,
   })
 
-  if (!token) {
+  if (!token && !inviteId) {
     return (
       <AuthShell>
         <AuthLogo />
-        <h1 className="text-2xl font-bold text-gray-900">Invalid invitation</h1>
-        <p className="mt-1 text-sm text-gray-500">This invitation link is missing its token.</p>
-        <Link to="/login" className="mt-4 text-sm font-medium text-blue-600 hover:underline">
+        <h1 className="text-[25px] font-extrabold leading-tight tracking-tight text-slate-950">Invalid invitation</h1>
+        <p className="mt-2 text-sm text-slate-500">This invitation link is missing its token.</p>
+        <Link to="/login" className="mt-4 text-sm font-medium text-[#0B8FE8] hover:underline">
           Go to login
         </Link>
       </AuthShell>
@@ -43,7 +56,7 @@ export default function ActivateInvitePage() {
     return (
       <AuthShell>
         <AuthLogo />
-        <p className="mt-6 text-sm text-gray-500">Checking your invitation…</p>
+        <p className="mt-6 text-sm text-slate-500">Checking your invitation…</p>
       </AuthShell>
     )
   }
@@ -52,13 +65,13 @@ export default function ActivateInvitePage() {
     return (
       <AuthShell>
         <AuthLogo />
-        <h1 className="text-2xl font-bold text-gray-900">Invitation unavailable</h1>
-        <p className="mt-2 max-w-sm text-center text-sm text-gray-500">
+        <h1 className="text-[25px] font-extrabold leading-tight tracking-tight text-slate-950">Invitation unavailable</h1>
+        <p className="mt-2 max-w-sm text-center text-sm text-slate-500">
           {preview.isError
             ? errorMessage(preview.error)
             : 'This invitation has expired. Ask your admin to send a new one.'}
         </p>
-        <Link to="/login" className="mt-4 text-sm font-medium text-blue-600 hover:underline">
+        <Link to="/login" className="mt-4 text-sm font-medium text-[#0B8FE8] hover:underline">
           Go to login
         </Link>
       </AuthShell>
@@ -73,7 +86,11 @@ export default function ActivateInvitePage() {
       setLoading(true)
       setError('')
       try {
-        await api.post('/auth/accept-invite', { token })
+        if (inviteId) {
+          await api.post('/auth/accept-invite-by-id', { invite_id: inviteId })
+        } else {
+          await api.post('/auth/accept-invite', { token })
+        }
         navigate('/app/dashboard')
       } catch (err) {
         setError(errorMessage(err))
@@ -84,10 +101,9 @@ export default function ActivateInvitePage() {
     return (
       <AuthShell>
         <AuthLogo />
-        <h1 className="text-2xl font-bold text-gray-900">Join {info.target_name}</h1>
-        <p className="mt-2 max-w-sm text-center text-sm text-gray-500">
-          You've been invited to the <strong>{info.target_name}</strong> {info.scope} in{' '}
-          {info.organization_name} as <strong>{info.role}</strong>.
+        <h1 className="text-[25px] font-extrabold leading-tight tracking-tight text-slate-950">Join {info.target_name}</h1>
+        <p className="mt-2 max-w-sm text-center text-sm text-slate-500">
+          You've been invited to <strong>{info.target_name}</strong> as <strong>{info.role}</strong>.
         </p>
         {user && user.email !== info.email && (
           <p className="mt-3 text-sm text-amber-600">
@@ -99,16 +115,16 @@ export default function ActivateInvitePage() {
           <button
             onClick={accept}
             disabled={loading}
-            className="mt-6 w-full rounded-lg bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-hover disabled:opacity-60"
+            className="mt-6 h-11 w-full rounded-xl bg-[#0B8FE8] text-sm font-semibold text-white shadow-sm hover:bg-[#0877C9] disabled:opacity-60"
           >
             {loading ? 'Joining…' : 'Accept invitation'}
           </button>
         ) : (
           <div className="mt-6 w-full text-center">
-            <p className="text-sm text-gray-500">Sign in with your existing account to accept.</p>
+            <p className="text-sm text-slate-500">Sign in with your existing account to accept.</p>
             <Link
               to={`/login`}
-              className="mt-3 inline-block w-full rounded-lg bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-hover"
+              className="mt-3 inline-flex h-11 w-full items-center justify-center rounded-xl bg-[#0B8FE8] text-sm font-semibold text-white shadow-sm hover:bg-[#0877C9]"
             >
               Sign in to accept
             </Link>
@@ -118,17 +134,18 @@ export default function ActivateInvitePage() {
     )
   }
 
-  // New user activation flow
-  const valid = fullName.trim().length > 0 && password.length >= 8 && password === confirm
+  // New user activation flow (passwordless — sign in afterwards via SSO or email code)
+  const valid = fullName.trim().length > 0
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!valid) return
+    if (!valid || loading) return
     setLoading(true)
     setError('')
     try {
-      await activateInvite(token, fullName.trim(), password)
-      navigate('/app/dashboard')
+      const data = await activateInvite(token, fullName.trim())
+      syncLoginWorkspaceStore(data.login_context)
+      navigate(DEFAULT_LOGIN_LANDING)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -136,49 +153,49 @@ export default function ActivateInvitePage() {
     }
   }
 
+  const isOrgOwner = info.scope === 'organization' && info.role === 'owner'
+
   return (
     <AuthShell>
       <AuthLogo />
-      <h1 className="text-2xl font-bold text-gray-900">You're invited!</h1>
-      <p className="mt-2 max-w-sm text-center text-sm text-gray-500">
-        Join <strong>{info.target_name}</strong> in {info.organization_name} as{' '}
-        <strong>{info.role}</strong>. Create your account for <strong>{info.email}</strong>.
-      </p>
+      {isOrgOwner ? (
+        <>
+          <h1 className="text-[25px] font-extrabold leading-tight tracking-tight text-slate-950">
+            Welcome to FlowDesk.
+          </h1>
+          <p className="mt-2 max-w-sm text-center text-sm text-slate-500">
+            You're the owner of <strong>{info.target_name}</strong>. Enter your name below to
+            activate your account — everything starts with you.
+          </p>
+        </>
+      ) : (
+        <>
+          <h1 className="text-[25px] font-extrabold leading-tight tracking-tight text-slate-950">
+            You're invited to {info.target_name}
+          </h1>
+          <p className="mt-2 max-w-sm text-center text-sm text-slate-500">
+            You've been added as <strong>{info.role}</strong>. Enter your name to set up your
+            account — sign in anytime with Google, Microsoft, or a one-time email code.
+          </p>
+        </>
+      )}
 
       <form onSubmit={onSubmit} className="mt-7 w-full space-y-3">
         <input
           type="text"
           placeholder="Your full name"
+          autoFocus
           value={fullName}
           onChange={(e) => setFullName(e.target.value)}
-          className="w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-[#0B8FE8] focus:ring-4 focus:ring-[#0B8FE8]/10"
         />
-        <input
-          type="password"
-          placeholder="Choose a password (8+ characters)"
-          autoComplete="new-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-        />
-        <input
-          type="password"
-          placeholder="Confirm password"
-          autoComplete="new-password"
-          value={confirm}
-          onChange={(e) => setConfirm(e.target.value)}
-          className="w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-900 outline-none placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-        />
-        {confirm && password !== confirm && (
-          <p className="text-sm text-amber-600">Passwords don't match yet.</p>
-        )}
         {error && <p className="text-sm text-red-600">{error}</p>}
         <button
           type="submit"
           disabled={!valid || loading}
-          className="w-full rounded-lg bg-brand py-2.5 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:bg-gray-300 disabled:text-gray-500"
+          className="h-11 w-full rounded-xl bg-[#0B8FE8] text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#0877C9] disabled:bg-slate-200 disabled:text-slate-400"
         >
-          {loading ? 'Creating account…' : 'Activate account'}
+          {loading ? 'Setting up…' : 'Activate account'}
         </button>
       </form>
     </AuthShell>

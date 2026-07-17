@@ -12,13 +12,17 @@ class User(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "users"
 
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
-    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_platform_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    auth_provider: Mapped[str] = mapped_column(String(20), default="password", nullable=False)
+    auth_provider: Mapped[str] = mapped_column(String(20), default="otp", nullable=False)
     google_sub: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    microsoft_sub: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    # TOTP two-factor auth (secret stored Fernet-encrypted; only set once enrolled)
+    totp_secret_enc: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    totp_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     profile: Mapped["Profile"] = relationship(
         back_populates="user", uselist=False, cascade="all, delete-orphan"
@@ -59,13 +63,40 @@ class RefreshToken(Base, UUIDPkMixin, TimestampMixin):
     ip_address: Mapped[str | None] = mapped_column(String(64))
 
 
-class PasswordResetToken(Base, UUIDPkMixin, TimestampMixin):
-    __tablename__ = "password_reset_tokens"
-    __table_args__ = (Index("ix_password_reset_tokens_user_id", "user_id"),)
+class LoginOtp(Base, UUIDPkMixin, TimestampMixin):
+    """One-time email code for passwordless sign-in. Only the code hash is stored."""
+
+    __tablename__ = "login_otps"
+    __table_args__ = (Index("ix_login_otps_email_created", "email", "created_at"),)
+
+    email: Mapped[str] = mapped_column(String(320), index=True, nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(default=0, nullable=False)
+
+
+class TwoFactorRecoveryCode(Base, UUIDPkMixin, TimestampMixin):
+    """One-time backup code for 2FA. Only the code hash is stored; consumed on use."""
+
+    __tablename__ = "two_factor_recovery_codes"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RevokedAccessToken(Base, UUIDPkMixin):
+    """Blocklist of revoked JWT access tokens keyed by jti."""
+
+    __tablename__ = "revoked_access_tokens"
+    __table_args__ = (Index("ix_revoked_access_tokens_expires_at", "expires_at"),)
+
+    jti: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

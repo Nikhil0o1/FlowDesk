@@ -1,13 +1,15 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.task_ref import format_task_ref
 from app.core.websocket import emit
 from app.models.comment import Comment
-from app.models.project import Project
+from app.models.project import Project, ProjectMember, TaskList
 from app.models.task import CustomStatus, Task, TaskAssignee
 from app.models.user import User
 from app.schemas.task import TaskOut
@@ -85,7 +87,7 @@ def build_task_outs(db: Session, project: Project, tasks: list[Task]) -> list[Ta
     outs = []
     for task in tasks:
         out = TaskOut.model_validate(task)
-        out.ref = f"{project.key}-{task.number}"
+        out.ref = format_task_ref(project.id, task.number)
         out.status = statuses.get(task.status_id)
         out.assignees = assignees_by_task.get(task.id, [])
         counts = subtask_counts.get(task.id, (0, 0))
@@ -99,6 +101,44 @@ def task_rooms(project: Project) -> list[str]:
     return [f"project:{project.id}", f"workspace:{project.workspace_id}"]
 
 
+def validate_task_list(db: Session, project_id: uuid.UUID, list_id: uuid.UUID | None) -> None:
+    if list_id is None:
+        return
+    task_list = db.get(TaskList, list_id)
+    if not task_list or task_list.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Task list does not belong to this project")
+
+
+def validate_assignee_ids(db: Session, project_id: uuid.UUID, user_ids: list[uuid.UUID]) -> None:
+    if not user_ids:
+        return
+    allowed = set(
+        db.scalars(
+            select(ProjectMember.user_id).where(ProjectMember.project_id == project_id)
+        ).all()
+    )
+    invalid = [uid for uid in user_ids if uid not in allowed]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail="One or more assignees are not members of this project",
+        )
+
+
+def validate_task_schedule_dates(
+    *,
+    start_date: date | None = None,
+    due_date: date | None = None,
+    existing_start: date | None = None,
+    existing_due: date | None = None,
+    today: date | None = None,
+) -> None:
+    """Ensure due date is on or after start date. Past dates are allowed."""
+    _ = (existing_start, existing_due, today)
+    if start_date and due_date and due_date < start_date:
+        raise HTTPException(status_code=422, detail="Due date must be on or after the start date")
+
+
 def assign_users(
     db: Session,
     task: Task,
@@ -109,12 +149,13 @@ def assign_users(
     notify_users: bool = True,
 ) -> list[uuid.UUID]:
     """Add assignees. Notifies + emails newly assigned users (never creates users)."""
+    validate_assignee_ids(db, project.id, user_ids)
     existing = set(
         db.scalars(select(TaskAssignee.user_id).where(TaskAssignee.task_id == task.id)).all()
     )
     added: list[uuid.UUID] = []
     actor_name = actor.profile.full_name if actor.profile and actor.profile.full_name else actor.email
-    ref = f"{project.key}-{task.number}"
+    ref = format_task_ref(project.id, task.number)
     for user_id in user_ids:
         if user_id in existing:
             continue
@@ -132,15 +173,18 @@ def assign_users(
                 workspace_id=project.workspace_id,
                 project_id=project.id,
             )
-            email_service.send_task_assigned_email(
-                user.email, task.title, ref, actor_name, task_url(task.id)
-            )
+            from app.services.inbox_service import user_email_notifications_enabled
+
+            if user_email_notifications_enabled(db, user_id):
+                email_service.send_task_assigned_email(
+                    user.email, task.title, ref, actor_name, task_url(task.id)
+                )
     if added:
         db.flush()
     return added
 
 
-def emit_assigned(project: Project, task: Task, added: list[uuid.UUID], actor: User) -> None:
+def emit_assigned(db: Session, project: Project, task: Task, added: list[uuid.UUID], actor: User) -> None:
     """Broadcast task.assigned — call only after the transaction has committed."""
     emit(
         "task.assigned",
@@ -150,6 +194,10 @@ def emit_assigned(project: Project, task: Task, added: list[uuid.UUID], actor: U
         project_id=project.id,
         workspace_id=project.workspace_id,
         task_id=task.id,
+    )
+    _dispatch_task_webhook(
+        db, project, task, "task.assigned",
+        {"assignee_ids": [str(u) for u in added], "assigned_by": str(actor.id)},
     )
 
 
@@ -163,7 +211,86 @@ def apply_status_change(db: Session, task: Task, new_status_id: uuid.UUID | None
         task.completed_at = _now()
     else:
         task.completed_at = None
+    from app.services import goal_progress_service
+
+    goal_progress_service.on_task_changed(db, task.id)
     return True
+
+
+STATUS_ADVANCE_RANK: dict[str, int] = {
+    "todo": 0,
+    "in_progress": 1,
+    "done": 2,
+    "cancelled": 3,
+}
+
+
+def status_advance_rank(status: CustomStatus | None) -> tuple[int, int]:
+    """Lower tuple = earlier / less-advanced in the workflow."""
+    if not status:
+        return (99, 99)
+    return (STATUS_ADVANCE_RANK.get(status.category, 9), status.position)
+
+
+def incomplete_subtask_count(db: Session, task_id: uuid.UUID) -> int:
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(Task)
+            .where(
+                Task.parent_task_id == task_id,
+                Task.deleted_at.is_(None),
+                Task.completed_at.is_(None),
+            )
+        )
+        or 0
+    )
+
+
+def assert_parent_may_complete(
+    db: Session,
+    task: Task,
+    new_status_id: uuid.UUID,
+    *,
+    force_complete_subtasks: bool = False,
+) -> None:
+    """Block completing a parent while subtasks are open unless explicitly confirmed."""
+    status = db.get(CustomStatus, new_status_id)
+    if not status or status.category != "done":
+        return
+    pending = incomplete_subtask_count(db, task.id)
+    if pending > 0 and not force_complete_subtasks:
+        raise HTTPException(
+            status_code=422,
+            detail="Subtasks are pending. Confirm to complete the parent task anyway.",
+        )
+
+
+def rollup_parent_task_status(db: Session, parent_task_id: uuid.UUID) -> bool:
+    """Set parent status to the least-advanced status among its subtasks."""
+    parent = db.get(Task, parent_task_id)
+    if not parent or parent.deleted_at is not None:
+        return False
+    children = db.scalars(
+        select(Task).where(
+            Task.parent_task_id == parent.id,
+            Task.deleted_at.is_(None),
+        )
+    ).all()
+    if not children:
+        return False
+    statuses: list[CustomStatus] = []
+    for child in children:
+        if child.status_id:
+            st = db.get(CustomStatus, child.status_id)
+            if st:
+                statuses.append(st)
+    if not statuses:
+        return False
+    lowest = min(statuses, key=status_advance_rank)
+    if parent.status_id == lowest.id:
+        return False
+    return apply_status_change(db, parent, lowest.id)
 
 
 def emit_task_event(event: str, db: Session, project: Project, task: Task, payload: dict | None = None) -> None:
@@ -175,6 +302,41 @@ def emit_task_event(event: str, db: Session, project: Project, task: Task, paylo
         workspace_id=project.workspace_id,
         task_id=task.id,
     )
+    if event in ("task.created", "task.updated", "task.deleted"):
+        extra = dict(payload or {})
+        _dispatch_task_webhook(db, project, task, event, extra)
+        # A status_id change also fires the dedicated status.changed event.
+        if event == "task.updated" and "status_id" in (extra.get("fields") or []):
+            _dispatch_task_webhook(db, project, task, "status.changed", extra)
+
+
+def _dispatch_task_webhook(
+    db: Session, project: Project, task: Task, event: str, extra: dict
+) -> None:
+    """Enqueue an outbound webhook for a task event. Best-effort, post-commit."""
+    from app.services import webhook_service
+
+    # Private tasks never leave FlowDesk — org-level webhook consumers must not
+    # see tasks that are hidden from most org members.
+    if getattr(task, "is_private", False):
+        return
+    status = db.get(CustomStatus, task.status_id) if task.status_id else None
+    webhook_service.enqueue_workspace_event(
+        db,
+        project.workspace_id,
+        event,
+        {
+            "task_id": str(task.id),
+            "task_ref": format_task_ref(project.id, task.number),
+            "project_id": str(project.id),
+            "workspace_id": str(project.workspace_id),
+            "title": task.title,
+            "priority": task.priority,
+            "status": status.name if status else None,
+            "due_date": task.due_date.isoformat() if task.due_date else None,
+            **extra,
+        },
+    )
 
 
 def log_task_activity(db: Session, project: Project, task: Task, action: str, actor_id: uuid.UUID, data: dict | None = None) -> None:
@@ -185,5 +347,5 @@ def log_task_activity(db: Session, project: Project, task: Task, action: str, ac
         task_id=task.id,
         actor_id=actor_id,
         action=action,
-        data={"ref": f"{project.key}-{task.number}", "title": task.title, **(data or {})},
+        data={"ref": format_task_ref(project.id, task.number), "title": task.title, **(data or {})},
     )

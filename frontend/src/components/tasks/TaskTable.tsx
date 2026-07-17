@@ -4,25 +4,33 @@ import {
   ChevronDown,
   ChevronRight,
   Flag,
-  GitBranch,
+  Layers,
+  Loader2,
   MessageSquare,
   Pencil,
   Plus,
+  Send,
   Tag,
   UserPlus,
   X,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
-import type { CustomStatus, Priority, Task, TaskDetail } from '../../lib/types'
-import { cn, formatDate, isOverdue, PRIORITY_COLORS, PRIORITY_LABELS } from '../../lib/utils'
+import { rememberOpenedTask } from '../../lib/taskListFocus'
+import { useRestoreTaskListFocus } from '../../lib/useRestoreTaskListFocus'
+import { useTaskPatch, withDueDate, withPriority, withStatus } from '../../lib/taskMutations'
+import { buildStatusUpdate } from '../../lib/taskStatusChange'
+import type { Comment, CustomStatus, Page, Priority, Task, TaskDetail } from '../../lib/types'
+import { cn, formatDate, isOverdue, PRIORITY_COLORS, PRIORITY_LABELS, renderMentions, timeAgo, toMentionMarkup } from '../../lib/utils'
 import { toast } from '../../stores/toast'
+import { MentionInput } from '../comments/MentionInput'
 import { AvatarStack } from '../ui/Avatar'
-import { LabelChip, PriorityFlag, StatusPill } from '../ui/badges'
+import { LabelChip, PriorityFlag, StatusIcon, StatusPill } from '../ui/badges'
 import { Dropdown } from '../ui/Dropdown'
-import { AssigneePicker, DatePicker, PriorityPicker, StatusPicker } from './pickers'
+import { AssigneePicker, CreateAssigneePicker, DatePicker, PriorityPicker, StatusPicker } from './pickers'
 
 export type GroupBy = 'status' | 'priority' | 'none'
 export type ColKey = 'assignee' | 'due' | 'priority' | 'status' | 'comments'
@@ -48,6 +56,7 @@ interface TaskTableProps {
   canEdit: boolean
   groupBy?: GroupBy
   cols?: ColKey[]
+  createGithubIssue?: boolean
 }
 
 interface Group {
@@ -64,7 +73,9 @@ export function TaskTable({
   canEdit,
   groupBy = 'status',
   cols = ALL_COLS,
+  createGithubIssue = false,
 }: TaskTableProps) {
+  useRestoreTaskListFocus(tasks.length > 0)
   const groups: Group[] = []
 
   if (groupBy === 'status') {
@@ -112,7 +123,14 @@ export function TaskTable({
   return (
     <div className="space-y-6 px-6 pb-20">
       {groups.map((group) => (
-        <TaskGroup key={group.key} projectId={projectId} group={group} cols={cols} canEdit={canEdit} />
+        <TaskGroup
+          key={group.key}
+          projectId={projectId}
+          group={group}
+          cols={cols}
+          canEdit={canEdit}
+          createGithubIssue={createGithubIssue}
+        />
       ))}
     </div>
   )
@@ -137,11 +155,13 @@ function TaskGroup({
   group,
   cols,
   canEdit,
+  createGithubIssue = false,
 }: {
   projectId: string
   group: Group
   cols: ColKey[]
   canEdit: boolean
+  createGithubIssue?: boolean
 }) {
   const [open, setOpen] = useState(true)
   const [adding, setAdding] = useState(false)
@@ -166,7 +186,7 @@ function TaskGroup({
             ))}
           </div>
           {group.tasks.map((task) => (
-            <TaskRow key={task.id} task={task} canEdit={canEdit} cols={cols} />
+            <TaskRow key={task.id} task={task} canEdit={canEdit} cols={cols} createGithubIssue={createGithubIssue} />
           ))}
           {canEdit &&
             (adding ? (
@@ -174,6 +194,7 @@ function TaskGroup({
                 projectId={projectId}
                 defaults={group.createDefaults}
                 onDone={() => setAdding(false)}
+                createGithubIssue={createGithubIssue}
               />
             ) : (
               <button
@@ -196,14 +217,15 @@ export function TaskRow({
   canEdit,
   cols = ALL_COLS,
   depth = 0,
+  createGithubIssue = false,
 }: {
   task: Task
   canEdit: boolean
   cols?: ColKey[]
   depth?: number
+  createGithubIssue?: boolean
 }) {
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState(false)
   const [addingSub, setAddingSub] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -211,15 +233,9 @@ export function TaskRow({
 
   useEffect(() => setDraft(task.title), [task.title])
 
-  const update = useMutation({
-    mutationFn: (body: Record<string, unknown>) => api.patch<Task>(`/tasks/${task.id}`, body),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
-      void queryClient.invalidateQueries({ queryKey: ['task', task.id] })
-      void queryClient.invalidateQueries({ queryKey: ['my-tasks'] })
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
+  const patch = useTaskPatch()
+  const update = (body: Record<string, unknown>, apply?: (t: Task) => Task) =>
+    patch.mutate({ taskId: task.id, body, apply })
 
   const overdue = isOverdue(task.due_date, task.completed_at)
   const isSubtask = !!task.parent_task_id || depth > 0
@@ -228,16 +244,22 @@ export function TaskRow({
   return (
     <>
       <div
+        data-task-id={task.id}
         className="group grid cursor-pointer items-center gap-2 border-b border-ink-700/60 bg-ink-900 px-4 py-2 transition-colors last:border-b-0 hover:bg-ink-850"
         style={{ gridTemplateColumns: gridTemplate(cols) }}
-        onClick={() => !renaming && navigate(`/app/tasks/${task.id}`)}
+        onClick={() => {
+          if (renaming) return
+          rememberOpenedTask(task.id)
+          navigate(`/app/tasks/${task.id}`)
+        }}
       >
         {/* Name cell */}
         <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: depth * 26 }}>
           {/* Expand caret (hover, or visible when has subtasks) */}
           <button
+            type="button"
             className={cn(
-              'shrink-0 rounded p-0.5 text-fg-muted transition-all hover:bg-ink-750 hover:text-fg',
+              'flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-muted transition-all hover:bg-ink-750 hover:text-fg',
               task.subtask_count > 0 || expanded
                 ? 'opacity-100'
                 : 'opacity-0 group-hover:opacity-100',
@@ -252,22 +274,23 @@ export function TaskRow({
             {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
           </button>
 
-          {/* Status ring */}
-          <span onClick={(e) => e.stopPropagation()} className="shrink-0">
+          {/* Status icon (click to change) */}
+          <span onClick={(e) => e.stopPropagation()} className="inline-flex h-5 shrink-0 items-center">
             {canEdit ? (
               <StatusPicker
                 projectId={task.project_id}
                 value={task.status}
-                onChange={(statusId) => update.mutate({ status_id: statusId })}
-              >
-                <span
-                  className="block h-3.5 w-3.5 cursor-pointer rounded-full border-2 border-dashed transition-transform hover:scale-110"
-                  style={{ borderColor: statusColor }}
-                  title={task.status?.name ?? 'Set status'}
-                />
-              </StatusPicker>
+                variant="icon"
+                onChange={(statusId, status) => {
+                  void buildStatusUpdate(task, status).then((body) => {
+                    if (body) update(body, withStatus(status))
+                  })
+                }}
+              />
             ) : (
-              <span className="block h-3.5 w-3.5 rounded-full border-2 border-dashed" style={{ borderColor: statusColor }} />
+              <span className="flex h-5 w-5 items-center justify-center">
+                <StatusIcon category={task.status?.category} color={statusColor} size={14} />
+              </span>
             )}
           </span>
 
@@ -280,7 +303,10 @@ export function TaskRow({
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
-                  if (draft.trim() && draft !== task.title) update.mutate({ title: draft.trim() })
+                  if (draft.trim() && draft !== task.title) {
+                    const title = draft.trim()
+                    update({ title }, (t) => ({ ...t, title }))
+                  }
                   setRenaming(false)
                 }
                 if (e.key === 'Escape') {
@@ -289,25 +315,21 @@ export function TaskRow({
                 }
               }}
               onBlur={() => {
-                if (draft.trim() && draft !== task.title) update.mutate({ title: draft.trim() })
+                if (draft.trim() && draft !== task.title) {
+                  const title = draft.trim()
+                  update({ title }, (t) => ({ ...t, title }))
+                }
                 setRenaming(false)
               }}
-              className="min-w-0 flex-1 rounded border border-brand bg-ink-800 px-1.5 py-0.5 text-sm text-fg outline-none"
+              className="min-w-0 flex-1 rounded border border-brand bg-ink-800 px-1.5 py-0.5 text-sm leading-5 text-fg outline-none"
             />
           ) : (
-            <span
-              className={cn(
-                'truncate text-sm',
-                task.completed_at ? 'text-fg-muted line-through' : 'text-fg',
-              )}
-            >
-              {task.title}
-            </span>
+            <span className="truncate text-sm leading-5 text-fg">{task.title}</span>
           )}
 
           {task.subtask_count > 0 && (
-            <span className="flex shrink-0 items-center gap-1 rounded bg-ink-750 px-1.5 py-0.5 text-[10px] text-fg-secondary">
-              <GitBranch size={10} />
+            <span className="flex h-5 shrink-0 items-center gap-1 rounded bg-ink-750 px-1.5 text-[10px] text-fg-secondary">
+              <Layers size={9} className="opacity-70" />
               {task.subtask_done_count}/{task.subtask_count}
             </span>
           )}
@@ -318,12 +340,13 @@ export function TaskRow({
           {/* Hover actions: add subtask / labels / rename */}
           {canEdit && !renaming && (
             <span
-              className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+              className="flex h-5 shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100"
               onClick={(e) => e.stopPropagation()}
             >
               {!isSubtask && (
                 <button
-                  className="rounded-md border border-ink-600 p-1 text-fg-muted transition-colors hover:border-fg-muted hover:text-fg"
+                  type="button"
+                  className="flex h-5 w-5 items-center justify-center rounded border border-ink-600 text-fg-muted transition-colors hover:border-fg-muted hover:text-fg"
                   title="Add subtask"
                   onClick={() => {
                     setExpanded(true)
@@ -333,9 +356,10 @@ export function TaskRow({
                   <Plus size={11} />
                 </button>
               )}
-              <LabelQuickEditor task={task} onSave={(labels) => update.mutate({ labels })} />
+              <LabelQuickEditor task={task} onSave={(labels) => update({ labels }, (t) => ({ ...t, labels }))} />
               <button
-                className="rounded-md border border-ink-600 p-1 text-fg-muted transition-colors hover:border-fg-muted hover:text-fg"
+                type="button"
+                className="flex h-5 w-5 items-center justify-center rounded border border-ink-600 text-fg-muted transition-colors hover:border-fg-muted hover:text-fg"
                 title="Rename"
                 onClick={() => setRenaming(true)}
               >
@@ -350,14 +374,10 @@ export function TaskRow({
           <div key={col} onClick={(e) => e.stopPropagation()}>
             {col === 'assignee' &&
               (canEdit ? (
-                <AssigneePicker task={task}>
-                  {task.assignees.length > 0 ? (
-                    <AvatarStack users={task.assignees} size={24} />
-                  ) : (
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-ink-600 text-fg-muted opacity-0 transition-opacity hover:border-fg-muted hover:text-fg-secondary group-hover:opacity-100">
-                      <UserPlus size={12} />
-                    </span>
-                  )}
+                <AssigneePicker task={task} size={24}>
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-ink-600 text-fg-muted opacity-0 transition-opacity hover:border-fg-muted hover:text-fg-secondary group-hover:opacity-100">
+                    <UserPlus size={12} />
+                  </span>
                 </AssigneePicker>
               ) : (
                 <AvatarStack users={task.assignees} size={24} />
@@ -367,7 +387,7 @@ export function TaskRow({
               (canEdit ? (
                 <DatePicker
                   value={task.due_date}
-                  onChange={(d) => update.mutate(d ? { due_date: d } : { clear_due_date: true })}
+                  onChange={(d) => update(d ? { due_date: d } : { clear_due_date: true }, withDueDate(d ?? null))}
                 >
                   {task.due_date ? (
                     <span className={cn('cursor-pointer text-xs', overdue ? 'font-medium text-red-400' : 'text-fg-secondary')}>
@@ -387,7 +407,7 @@ export function TaskRow({
               (canEdit ? (
                 <PriorityPicker
                   value={task.priority}
-                  onChange={(p) => update.mutate(p ? { priority: p } : { clear_priority: true })}
+                  onChange={(p) => update(p ? { priority: p } : { clear_priority: true }, withPriority(p ?? null))}
                 >
                   <span className={cn('inline-flex cursor-pointer', !task.priority && 'opacity-40 group-hover:opacity-100')}>
                     <PriorityFlag priority={task.priority} />
@@ -402,21 +422,18 @@ export function TaskRow({
                 <StatusPicker
                   projectId={task.project_id}
                   value={task.status}
-                  onChange={(statusId) => update.mutate({ status_id: statusId })}
-                >
-                  <span className="inline-flex cursor-pointer">
-                    <StatusPill status={task.status} />
-                  </span>
-                </StatusPicker>
+                  onChange={(statusId, status) => {
+                    void buildStatusUpdate(task, status).then((body) => {
+                      if (body) update(body, withStatus(status))
+                    })
+                  }}
+                />
               ) : (
                 <StatusPill status={task.status} />
               ))}
 
             {col === 'comments' && (
-              <span className="flex items-center gap-1 text-fg-muted">
-                <MessageSquare size={13} />
-                <span className="text-xs">{task.comment_count || ''}</span>
-              </span>
+              <CommentPopover taskId={task.id} projectId={task.project_id} count={task.comment_count} />
             )}
           </div>
         ))}
@@ -430,6 +447,7 @@ export function TaskRow({
           canEdit={canEdit}
           adding={addingSub}
           onDoneAdding={() => setAddingSub(false)}
+          createGithubIssue={createGithubIssue}
         />
       )}
     </>
@@ -442,12 +460,14 @@ function SubtaskRows({
   canEdit,
   adding,
   onDoneAdding,
+  createGithubIssue = false,
 }: {
   task: Task
   cols: ColKey[]
   canEdit: boolean
   adding: boolean
   onDoneAdding: () => void
+  createGithubIssue?: boolean
 }) {
   const { data } = useQuery({
     queryKey: ['task', task.id],
@@ -466,6 +486,7 @@ function SubtaskRows({
           parentTaskId={task.id}
           depth={1}
           onDone={onDoneAdding}
+          createGithubIssue={createGithubIssue}
           onCreated={() => {
             void 0
           }}
@@ -484,7 +505,8 @@ function LabelQuickEditor({ task, onSave }: { task: Task; onSave: (labels: strin
       width="w-56"
       trigger={
         <button
-          className="rounded-md border border-ink-600 p-1 text-fg-muted transition-colors hover:border-fg-muted hover:text-fg"
+          type="button"
+          className="flex h-5 w-5 items-center justify-center rounded border border-ink-600 text-fg-muted transition-colors hover:border-fg-muted hover:text-fg"
           title="Labels"
         >
           <Tag size={11} />
@@ -535,6 +557,7 @@ export function InlineCreateRow({
   depth = 0,
   onDone,
   onCreated,
+  createGithubIssue = false,
 }: {
   projectId: string
   defaults: { status_id?: string; priority?: Priority }
@@ -542,24 +565,29 @@ export function InlineCreateRow({
   depth?: number
   onDone: () => void
   onCreated?: (task: Task) => void
+  createGithubIssue?: boolean
 }) {
   const [title, setTitle] = useState('')
   const [priority, setPriority] = useState<Priority | null>(defaults.priority ?? null)
   const [dueDate, setDueDate] = useState<string | null>(null)
+  const [assigneeIds, setAssigneeIds] = useState<string[]>([])
   const queryClient = useQueryClient()
 
   const create = useMutation({
     mutationFn: () =>
       api.post<Task>(`/projects/${projectId}/tasks`, {
         title: title.trim(),
+        create_github_issue: createGithubIssue,
         ...(defaults.status_id ? { status_id: defaults.status_id } : {}),
         ...(priority ? { priority } : {}),
         ...(dueDate ? { due_date: dueDate } : {}),
+        ...(assigneeIds.length ? { assignee_ids: assigneeIds } : {}),
         ...(parentTaskId ? { parent_task_id: parentTaskId } : {}),
       }),
     onSuccess: (task) => {
       setTitle('')
       void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['my-tasks'] })
       if (parentTaskId) void queryClient.invalidateQueries({ queryKey: ['task', parentTaskId] })
       onCreated?.(task)
     },
@@ -568,8 +596,8 @@ export function InlineCreateRow({
 
   return (
     <div className="flex items-center gap-2 border-b border-ink-700/60 bg-ink-850 px-4 py-2 last:border-b-0">
-      <span style={{ paddingLeft: depth * 26 }} className="flex items-center">
-        <span className="ml-5 block h-3.5 w-3.5 rounded-full border-2 border-dashed border-ink-600" />
+      <span style={{ paddingLeft: depth * 26 }} className="ml-5 flex items-center">
+        <StatusIcon category="todo" color="#87909E" size={15} />
       </span>
       <input
         autoFocus
@@ -583,6 +611,18 @@ export function InlineCreateRow({
         className="min-w-0 flex-1 bg-transparent text-sm text-fg outline-none placeholder:text-fg-muted"
       />
       <span className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        <CreateAssigneePicker projectId={projectId} value={assigneeIds} onChange={setAssigneeIds}>
+          <button
+            className={cn(
+              'flex items-center gap-1 rounded-md border border-ink-600 p-1.5 transition-colors hover:border-fg-muted',
+              assigneeIds.length ? 'text-brand' : 'text-fg-muted hover:text-fg',
+            )}
+            title="Assignees"
+          >
+            <UserPlus size={12} />
+            {assigneeIds.length > 0 && <span className="text-[10px] font-semibold">{assigneeIds.length}</span>}
+          </button>
+        </CreateAssigneePicker>
         <PriorityPicker value={priority} onChange={setPriority}>
           <button
             className={cn(
@@ -594,7 +634,7 @@ export function InlineCreateRow({
             <Flag size={12} style={priority ? { color: PRIORITY_COLORS[priority] } : undefined} fill={priority ? PRIORITY_COLORS[priority] : 'none'} />
           </button>
         </PriorityPicker>
-        <DatePicker value={dueDate} onChange={setDueDate}>
+        <DatePicker value={dueDate} onChange={setDueDate} closeOnSelect={false}>
           <button
             className="flex items-center gap-1 rounded-md border border-ink-600 p-1.5 text-fg-muted transition-colors hover:border-fg-muted hover:text-fg"
             title="Due date"
@@ -609,11 +649,235 @@ export function InlineCreateRow({
         <button
           onClick={() => title.trim() && create.mutate()}
           disabled={!title.trim() || create.isPending}
-          className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 transition-colors hover:bg-gray-200 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 transition-colors hover:bg-gray-200 disabled:opacity-50"
         >
-          Save ↵
+          {create.isPending && <Loader2 size={12} className="animate-spin" />}
+          {create.isPending ? 'Saving…' : 'Save ↵'}
         </button>
       </span>
+    </div>
+  )
+}
+
+/** Strip mention markup for compact list display. */
+function plainComment(body: string): string {
+  return renderMentions(body)
+}
+
+function CommentPopover({
+  taskId,
+  projectId,
+  count,
+}: {
+  taskId: string
+  projectId: string
+  count: number
+}) {
+  const [open, setOpen] = useState(false)
+  const [position, setPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null)
+  const [contentVersion, setContentVersion] = useState(0)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const anchorRectRef = useRef<DOMRect | null>(null)
+
+  const openPanel = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    anchorRectRef.current = rect
+    setContentVersion(0)
+    // Seed a below-trigger position, then refine once the panel mounts.
+    setPosition({
+      top: rect.bottom + 8,
+      left: Math.max(12, Math.min(rect.right - 320, window.innerWidth - 320 - 12)),
+      maxHeight: Math.max(180, window.innerHeight - rect.bottom - 20),
+    })
+    setOpen(true)
+  }
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const rect = anchorRectRef.current
+    const panel = panelRef.current
+    if (!rect) return
+
+    const panelWidth = 320
+    const viewportW = window.innerWidth
+    const viewportH = window.innerHeight
+    const gap = 8
+    const margin = 12
+    const naturalHeight = panel?.offsetHeight || 280
+    const spaceBelow = viewportH - rect.bottom - gap - margin
+    const spaceAbove = rect.top - gap - margin
+    // Prefer downward consistently; only flip when below is clearly too tight.
+    const openUp = spaceBelow < 160 && spaceAbove > spaceBelow + 40
+    const maxHeight = Math.max(180, openUp ? spaceAbove : spaceBelow)
+    const height = Math.min(naturalHeight, maxHeight)
+    // Stay glued to the trigger — do not clamp into a free-floating position.
+    const top = openUp ? rect.top - gap - height : rect.bottom + gap
+    const left = Math.max(margin, Math.min(rect.right - panelWidth, viewportW - panelWidth - margin))
+    setPosition({ top, left, maxHeight })
+  }, [open, contentVersion])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        setPosition(null)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open])
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="flex h-5 items-center gap-1 rounded px-1 text-fg-muted transition-colors hover:bg-ink-750 hover:text-fg"
+        title="Comments"
+        onClick={openPanel}
+      >
+        <MessageSquare size={13} />
+        <span className="text-xs leading-none">{count || ''}</span>
+      </button>
+      {open &&
+        position &&
+        createPortal(
+          <>
+            <div
+              className="fixed inset-0 z-[200]"
+              onClick={() => {
+                setOpen(false)
+                setPosition(null)
+              }}
+              aria-hidden
+            />
+            <div
+              ref={panelRef}
+              className="menu-panel fixed z-[210] w-80 overflow-y-auto shadow-popover"
+              style={{ top: position.top, left: position.left, maxHeight: position.maxHeight }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <CommentPopoverBody
+                taskId={taskId}
+                projectId={projectId}
+                onClose={() => {
+                  setOpen(false)
+                  setPosition(null)
+                }}
+                onContentReady={() => setContentVersion((v) => v + 1)}
+              />
+            </div>
+          </>,
+          document.body,
+        )}
+    </>
+  )
+}
+
+function CommentPopoverBody({
+  taskId,
+  projectId,
+  onClose,
+  onContentReady,
+}: {
+  taskId: string
+  projectId: string
+  onClose?: () => void
+  onContentReady?: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [text, setText] = useState('')
+  const [mentionMap, setMentionMap] = useState<Map<string, string>>(new Map())
+  const { data, isLoading } = useQuery({
+    queryKey: ['comments', taskId],
+    queryFn: () => api.get<Page<Comment>>(`/tasks/${taskId}/comments?page_size=50`),
+  })
+  const post = useMutation({
+    mutationFn: () =>
+      api.post<Comment>(`/tasks/${taskId}/comments`, {
+        body: toMentionMarkup(text.trim(), mentionMap),
+        parent_comment_id: null,
+      }),
+    onSuccess: () => {
+      setText('')
+      setMentionMap(new Map())
+      void queryClient.invalidateQueries({ queryKey: ['comments', taskId] })
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['my-tasks'] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+  const comments = data?.items ?? []
+  const onContentReadyRef = useRef(onContentReady)
+  onContentReadyRef.current = onContentReady
+
+  useLayoutEffect(() => {
+    if (isLoading) return
+    onContentReadyRef.current?.()
+  }, [isLoading, comments.length])
+
+  const rememberMention = (name: string, userId: string) =>
+    setMentionMap((m) => new Map(m).set(name, userId))
+
+  const submit = () => {
+    if (text.trim() && !post.isPending) post.mutate()
+  }
+
+  return (
+    <div className="overflow-visible p-2.5">
+      <div className="mb-2 flex items-center justify-between px-1">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-fg-muted">Comments</p>
+        {onClose && (
+          <button type="button" className="rounded p-1 text-fg-muted hover:bg-ink-750 hover:text-fg" onClick={onClose}>
+            <X size={14} />
+          </button>
+        )}
+      </div>
+      <div className="max-h-56 space-y-2 overflow-y-auto px-1">
+        {isLoading ? (
+          <p className="py-2 text-xs text-fg-muted">Loading…</p>
+        ) : comments.length === 0 ? (
+          <p className="py-2 text-xs text-fg-muted">No comments yet. Start the conversation.</p>
+        ) : (
+          comments.slice(-20).map((c) => (
+            <div key={c.id} className="rounded-lg bg-ink-850 px-2.5 py-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-fg">{c.author?.full_name ?? 'Someone'}</span>
+                <span className="text-[10px] text-fg-muted">{timeAgo(c.created_at)}</span>
+              </div>
+              <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-fg-secondary">{plainComment(c.body)}</p>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="mt-2 flex items-end gap-1.5 overflow-visible px-1">
+        <div className="min-w-0 flex-1 overflow-visible">
+          <MentionInput
+            projectId={projectId}
+            value={text}
+            onChange={setText}
+            onMention={rememberMention}
+            onSubmit={submit}
+            placeholder="Write a comment… use @ to mention"
+            autoFocus
+            compact
+          />
+        </div>
+        <button
+          type="button"
+          className="btn-primary shrink-0 !px-3 !py-2"
+          disabled={!text.trim() || post.isPending}
+          onClick={submit}
+          title="Send"
+        >
+          <Send size={14} />
+        </button>
+      </div>
     </div>
   )
 }

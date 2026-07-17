@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { FileText, FolderKanban, MessageSquare, Search, User as UserIcon } from 'lucide-react'
+import { FileText, FolderKanban, FolderPlus, MessageSquare, Search, Trophy, User as UserIcon } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
@@ -43,7 +43,13 @@ export function SearchCommand({ open, onClose }: { open: boolean; onClose: () =>
   }
 
   const hasResults =
-    data && (data.tasks.length || data.projects.length || data.comments.length || data.users.length)
+    data &&
+    (data.tasks.length ||
+      data.projects.length ||
+      data.comments.length ||
+      data.users.length ||
+      data.goals?.length ||
+      data.goal_folders?.length)
 
   return createPortal(
     <div
@@ -58,7 +64,7 @@ export function SearchCommand({ open, onClose }: { open: boolean; onClose: () =>
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search tasks, projects, comments, people…"
+            placeholder="Search tasks, projects, goals, people…"
             className="flex-1 bg-transparent text-sm text-fg outline-none placeholder:text-fg-muted"
           />
           {isFetching && <Spinner className="h-4 w-4" />}
@@ -92,7 +98,30 @@ export function SearchCommand({ open, onClose }: { open: boolean; onClose: () =>
                     <button key={project.id} className="menu-item" onClick={() => go(`/app/projects/${project.id}`)}>
                       <FolderKanban size={14} className="shrink-0" style={{ color: project.color }} />
                       <span className="flex-1 truncate">{project.name}</span>
-                      <span className="text-xs text-fg-muted">{project.key}</span>
+                    </button>
+                  ))}
+                </ResultGroup>
+              ) : null}
+              {data?.goal_folders?.length ? (
+                <ResultGroup label="Goal folders">
+                  {data.goal_folders.map((folder) => (
+                    <button
+                      key={folder.id}
+                      className="menu-item"
+                      onClick={() => go(`/app/goals?folder=${folder.id}`)}
+                    >
+                      <FolderPlus size={14} className="shrink-0 text-fg-muted" style={{ color: folder.color ?? undefined }} />
+                      <span className="flex-1 truncate">{folder.name}</span>
+                    </button>
+                  ))}
+                </ResultGroup>
+              ) : null}
+              {data?.goals?.length ? (
+                <ResultGroup label="Goals">
+                  {data.goals.map((goal) => (
+                    <button key={goal.id} className="menu-item" onClick={() => go(`/app/goals?goal=${goal.id}`)}>
+                      <Trophy size={14} className="shrink-0 text-fg-muted" />
+                      <span className="flex-1 truncate">{goal.name}</span>
                     </button>
                   ))}
                 </ResultGroup>

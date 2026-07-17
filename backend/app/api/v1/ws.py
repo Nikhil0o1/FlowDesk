@@ -1,50 +1,53 @@
+"""In-app realtime WebSocket (JWT session ticket path)."""
+from __future__ import annotations
+
 import json
-import uuid
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
-from app.core.security import decode_access_token
-from app.core.websocket import manager
+from app.api.deps import get_current_user_jwt
+from app.core.websocket import ConnectionLimitError, manager
+from app.core.ws_origin import ws_origin_allowed
+from app.core.ws_protocol import resolve_rooms, run_socket_loop
 from app.db.session import SessionLocal
-from app.models.chat import ChatMember
 from app.models.user import User
-from app.services.permission_service import PermissionService
+from app.services import ws_ticket_service
 
 router = APIRouter(tags=["realtime"])
 
 
-def _resolve_rooms(user: User) -> tuple[list[str], list[str]]:
-    """Compute the rooms this user may join. Returns (rooms, workspace_rooms)."""
-    db = SessionLocal()
-    try:
-        perms = PermissionService(db, user)
-        workspace_ids = perms.accessible_workspace_ids()
-        project_ids = perms.accessible_project_ids()
-        channel_ids = db.scalars(
-            select(ChatMember.channel_id).where(ChatMember.user_id == user.id)
-        ).all()
-        ws_rooms = [f"workspace:{wid}" for wid in workspace_ids]
-        rooms = (
-            ws_rooms
-            + [f"project:{pid}" for pid in project_ids]
-            + [f"channel:{cid}" for cid in channel_ids]
-        )
-        return rooms, ws_rooms
-    finally:
-        db.close()
+class WsTicketOut(BaseModel):
+    ticket: str
+    expires_in: int
+
+
+@router.post("/ws/ticket", response_model=WsTicketOut)
+def create_ws_ticket(user: User = Depends(get_current_user_jwt)):
+    """Issue a short-lived, single-use ticket for WebSocket connect (avoids JWT in URL).
+
+    Session JWT only — personal access tokens cannot mint tickets.
+    """
+    ticket, expires_in = ws_ticket_service.issue_ws_ticket(user.id)
+    return WsTicketOut(ticket=ticket, expires_in=expires_in)
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
-    payload = decode_access_token(token)
-    if payload is None:
+async def websocket_endpoint(ws: WebSocket, ticket: str = Query(...)):
+    if not ws_origin_allowed(ws):
         await ws.accept()
-        await ws.close(code=4401, reason="Invalid token")
+        await ws.close(code=4403, reason="Origin not allowed")
         return
+
+    user_id = ws_ticket_service.redeem_ws_ticket(ticket)
+    if user_id is None:
+        await ws.accept()
+        await ws.close(code=4401, reason="Invalid or expired ticket")
+        return
+
     db = SessionLocal()
     try:
-        user = db.get(User, uuid.UUID(payload["sub"]))
+        user = db.get(User, user_id)
         if not user or not user.is_active or user.deleted_at is not None:
             await ws.accept()
             await ws.close(code=4401, reason="Account inactive")
@@ -53,67 +56,37 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
         db.close()
 
     await ws.accept()
-    rooms, ws_rooms = _resolve_rooms(user)
-    came_online = await manager.connect(ws, str(user.id), rooms)
+    rooms, ws_rooms = resolve_rooms(user)
+    try:
+        came_online = await manager.connect(ws, str(user.id), rooms, source="app")
+    except ConnectionLimitError as exc:
+        await ws.close(code=4010, reason=str(exc)[:120])
+        return
 
     if came_online:
         for room in ws_rooms:
             await manager.broadcast(
-                room, {"type": "presence.online", "payload": {"user_id": str(user.id)}}
+                room,
+                {"type": "presence.online", "payload": {"user_id": str(user.id)}},
+                exclude=ws,
             )
-    # Send the currently-online users so the client can seed presence state
     await ws.send_text(
-        json.dumps({"type": "presence.state", "payload": {"online_user_ids": manager.online_user_ids()}})
+        json.dumps(
+            {
+                "type": "presence.state",
+                "payload": {"online_user_ids": await manager.online_user_ids_in_rooms(ws_rooms)},
+            }
+        )
     )
 
     try:
-        while True:
-            raw = await ws.receive_text()
-            try:
-                message = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            mtype = message.get("type")
-
-            if mtype == "ping":
-                await ws.send_text(json.dumps({"type": "pong"}))
-
-            elif mtype == "chat.typing":
-                channel_id = str(message.get("channel_id", ""))
-                room = f"channel:{channel_id}"
-                # Only forward typing to channels the socket is actually subscribed to
-                if room in manager._socket_rooms.get(ws, set()):
-                    await manager.broadcast(
-                        room,
-                        {
-                            "type": "chat.typing",
-                            "channel_id": channel_id,
-                            "payload": {"user_id": str(user.id)},
-                        },
-                        exclude=ws,
-                    )
-
-            elif mtype == "subscribe.channel":
-                # Join a channel room created after connect (membership verified)
-                channel_id = message.get("channel_id")
-                db = SessionLocal()
-                try:
-                    member = db.scalar(
-                        select(ChatMember).where(
-                            ChatMember.channel_id == uuid.UUID(str(channel_id)),
-                            ChatMember.user_id == user.id,
-                        )
-                    )
-                finally:
-                    db.close()
-                if member:
-                    await manager.subscribe(ws, f"channel:{channel_id}")
+        await run_socket_loop(ws, user, allow_collab_relay=True)
     except WebSocketDisconnect:
         pass
     finally:
-        user_id, went_offline = await manager.disconnect(ws)
-        if user_id and went_offline:
+        user_id_str, went_offline = await manager.disconnect(ws)
+        if user_id_str and went_offline:
             for room in ws_rooms:
                 await manager.broadcast(
-                    room, {"type": "presence.offline", "payload": {"user_id": user_id}}
+                    room, {"type": "presence.offline", "payload": {"user_id": user_id_str}}
                 )

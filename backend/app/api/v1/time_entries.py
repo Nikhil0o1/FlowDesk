@@ -6,6 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_permissions
+from app.core.pat_route_registry import pat_allow
+from app.core.task_ref import format_task_ref
 from app.core.websocket import emit
 from app.db.session import get_db
 from app.models.project import Project
@@ -29,7 +31,7 @@ def _entry_out(db: Session, entry: TimeEntry, with_task: bool = False) -> TimeEn
             out.task_title = task.title
             project = db.get(Project, task.project_id)
             if project:
-                out.task_ref = f"{project.key}-{task.number}"
+                out.task_ref = format_task_ref(project.id, task.number)
     return out
 
 
@@ -40,13 +42,19 @@ def _get_task_with_access(
     if not task or task.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Task not found")
     if edit:
-        perms.require_project_edit(task.project_id)
+        perms.require_task_edit(task)
     else:
-        perms.require_project_view(task.project_id)
+        perms.require_task_view(task)
     return task
 
 
 @router.post("/tasks/{task_id}/timer/start", response_model=TimeEntryOut, status_code=201)
+@pat_allow(
+    "time:write",
+    rate_category="standard_write",
+    authz_class="object",
+    tenant_resolution="Task → project → org",
+)
 def start_timer(
     task_id: uuid.UUID,
     body: TimerStart,
@@ -86,6 +94,12 @@ def start_timer(
 
 
 @router.post("/timer/stop", response_model=TimeEntryOut)
+@pat_allow(
+    "time:write",
+    rate_category="standard_write",
+    authz_class="principal",
+    tenant_resolution="Stops current user's running timer",
+)
 def stop_timer(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -112,6 +126,12 @@ def stop_timer(
 
 
 @router.get("/timer/current", response_model=TimeEntryOut | None)
+@pat_allow(
+    "time:read",
+    rate_category="standard",
+    authz_class="principal",
+    tenant_resolution="Current user's running timer",
+)
 def current_timer(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     entry = db.scalar(
         select(TimeEntry).where(TimeEntry.user_id == user.id, TimeEntry.ended_at.is_(None))
@@ -120,6 +140,12 @@ def current_timer(db: Session = Depends(get_db), user: User = Depends(get_curren
 
 
 @router.post("/tasks/{task_id}/time-entries", response_model=TimeEntryOut, status_code=201)
+@pat_allow(
+    "time:write",
+    rate_category="standard_write",
+    authz_class="object",
+    tenant_resolution="Task → project → org",
+)
 def add_manual_entry(
     task_id: uuid.UUID,
     body: ManualTimeEntry,
@@ -142,6 +168,12 @@ def add_manual_entry(
 
 
 @router.get("/tasks/{task_id}/time-entries", response_model=Page[TimeEntryOut])
+@pat_allow(
+    "time:read",
+    rate_category="standard",
+    authz_class="object",
+    tenant_resolution="Task → project → org",
+)
 def task_time_entries(
     task_id: uuid.UUID,
     page: int = Query(1, ge=1),
@@ -161,6 +193,12 @@ def task_time_entries(
 
 
 @router.get("/me/time-entries", response_model=Page[TimeEntryOut])
+@pat_allow(
+    "time:read",
+    rate_category="standard",
+    authz_class="principal",
+    tenant_resolution="Authenticated user's time entries across memberships",
+)
 def my_time_entries(
     start: datetime | None = Query(default=None),
     end: datetime | None = Query(default=None),
@@ -169,7 +207,11 @@ def my_time_entries(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    base = select(TimeEntry).where(TimeEntry.user_id == user.id)
+    base = (
+        select(TimeEntry)
+        .join(Task, TimeEntry.task_id == Task.id)
+        .where(TimeEntry.user_id == user.id, Task.deleted_at.is_(None))
+    )
     if start:
         base = base.where(TimeEntry.started_at >= start)
     if end:

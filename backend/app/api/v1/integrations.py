@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_permissions
+from app.core.task_ref import format_task_ref
 from app.db.session import get_db
 from app.models.integration import GoogleSheetSync
 from app.models.task import Task
@@ -87,7 +88,7 @@ def task_emails(
     connection = google_service.get_connection(db, perms.user.id)
     if not google_service.has_scope(connection, google_service.SCOPE_GMAIL_READ):
         return TaskEmailsOut(connected=False)
-    ref = f"{project.key}-{task.number}"
+    ref = format_task_ref(project.id, task.number)
     messages = google_service.gmail_search(db, connection, f'"{ref}"', limit=10)
     return TaskEmailsOut(connected=True, emails=[TaskEmail(**m) for m in messages])
 
@@ -119,15 +120,18 @@ def add_task_to_calendar(
         )
     from app.core.config import settings
 
-    ref = f"{project.key}-{task.number}"
-    link = google_service.calendar_create_event(
+    ref = format_task_ref(project.id, task.number)
+    result = google_service.calendar_create_event(
         db,
         connection,
         summary=f"{ref}: {task.title}",
         description=f"FlowDesk task {ref}\n{settings.FRONTEND_URL}/app/tasks/{task.id}",
         day=task.due_date,
     )
-    return CalendarEventOut(link=link)
+    if result.get("id"):
+        task.google_calendar_event_id = result["id"]
+        db.commit()
+    return CalendarEventOut(link=result.get("link", ""))
 
 
 # ---------------- Sheets export & live sync ----------------
@@ -168,9 +172,12 @@ def export_project_to_sheet(
     project = perms.require_project_view(project_id)
     connection = _require_sheets_connection(db, perms)
     spreadsheet_id, url = google_service.sheets_create(
-        db, connection, f"{project.name} ({project.key}) — FlowDesk export"
+        db, connection, f"{project.name} — FlowDesk export"
     )
-    google_service.sheets_overwrite(db, connection, spreadsheet_id, build_project_rows(db, project))
+    try:
+        google_service.sheets_overwrite(db, connection, spreadsheet_id, build_project_rows(db, project))
+    except google_service.GoogleConnectionExpired as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
     ws = perms.get_workspace_or_404(project.workspace_id)
     audit(db, "sheets.exported", organization_id=ws.organization_id, actor_id=perms.user.id,
           target_type="project", target_id=project.id, data={"spreadsheet_id": spreadsheet_id})
@@ -224,7 +231,7 @@ def toggle_sheet_sync(
         sync.snapshot = None
     else:
         spreadsheet_id, url = google_service.sheets_create(
-            db, connection, f"{project.name} ({project.key}) — FlowDesk live sync"
+            db, connection, f"{project.name} — FlowDesk live sync"
         )
         sync = GoogleSheetSync(
             project_id=project_id,
@@ -261,7 +268,7 @@ def export_time_report(
     connection = _require_sheets_connection(db, perms)
     entries, summary = build_time_report(db, project, start, end)
     spreadsheet_id, url = google_service.sheets_create(
-        db, connection, f"{project.name} ({project.key}) — Time report", tabs=["Entries", "Summary"]
+        db, connection, f"{project.name} — Time report", tabs=["Entries", "Summary"]
     )
     google_service.sheets_write(db, connection, spreadsheet_id, "Entries!A1", entries)
     google_service.sheets_write(db, connection, spreadsheet_id, "Summary!A1", summary)

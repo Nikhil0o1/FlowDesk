@@ -40,6 +40,8 @@ class TeamOut(ORMModel):
     member_details: list[TeamMemberOut] = []
     my_role: str | None = None
     can_manage_members: bool = False
+    can_delete: bool = False
+    can_create_teams: bool = False
 
 
 class TeamMembersAdd(BaseModel):

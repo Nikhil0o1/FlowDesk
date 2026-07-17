@@ -15,6 +15,7 @@ import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
+import { copyPublicFormLink } from '../../lib/publicForms'
 import { useCurrentContext, useForms, useProjects, useWorkspaceMembers } from '../../lib/queries'
 import type { FormDef, FormField } from '../../lib/types'
 import { cn, timeAgo } from '../../lib/utils'
@@ -73,7 +74,7 @@ const TEMPLATES: FormTemplate[] = [
     key: 'order',
     name: 'Order Form',
     description: 'Capture and process client orders',
-    color: '#8C5BFF',
+    color: '#2B88EE',
     icon: <ShoppingCart size={20} />,
     fields: [
       { id: 'title', type: 'text', label: 'Order title', required: true },
@@ -86,7 +87,7 @@ const TEMPLATES: FormTemplate[] = [
 ]
 
 export default function FormsPage() {
-  const { workspace } = useCurrentContext()
+  const { org, workspace } = useCurrentContext()
   const forms = useForms(workspace?.id)
   const members = useWorkspaceMembers(workspace?.id)
   const user = useAuthStore((s) => s.user)
@@ -98,6 +99,13 @@ export default function FormsPage() {
 
   const mineOnly = params.get('mine') === '1'
   const createOpen = params.get('new') === '1'
+  const currentMemberRole = members.data?.find((member) => member.user_id === user?.id)?.role
+  const canManageForms =
+    (org?.my_role === 'owner' || org?.my_role === 'admin') ||
+    workspace?.my_role === 'owner' ||
+    workspace?.my_role === 'admin' ||
+    currentMemberRole === 'owner' ||
+    currentMemberRole === 'admin'
 
   const visible = (forms.data ?? []).filter(
     (f) =>
@@ -109,7 +117,7 @@ export default function FormsPage() {
     members.data?.find((m) => m.user_id === userId)?.user ?? null
 
   const copyLink = async (form: FormDef) => {
-    await navigator.clipboard.writeText(`${window.location.origin}/f/${form.public_token}`)
+    await copyPublicFormLink(form.public_token)
     toast.success('Public link copied')
   }
 
@@ -130,39 +138,45 @@ export default function FormsPage() {
     <div className="mx-auto max-w-6xl px-8 py-7">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-fg">{mineOnly ? 'My Forms' : 'All Forms'}</h1>
-        <button
-          className="btn-primary"
-          onClick={() => {
-            params.set('new', '1')
-            setParams(params, { replace: true })
-          }}
-        >
-          <Plus size={15} /> New Form
-        </button>
+        {canManageForms && (
+          <button
+            className="btn-primary"
+            onClick={() => {
+              params.set('new', '1')
+              setParams(params, { replace: true })
+            }}
+          >
+            <Plus size={15} /> New Form
+          </button>
+        )}
       </div>
 
       {/* Templates */}
-      <p className="mb-2.5 mt-6 text-xs font-semibold uppercase tracking-wider text-fg-muted">Templates</p>
-      <div className="grid grid-cols-3 gap-4 max-md:grid-cols-1">
-        {TEMPLATES.map((tpl) => (
-          <button
-            key={tpl.key}
-            onClick={() => setTemplate(tpl)}
-            className="flex items-center gap-4 rounded-2xl border border-ink-700 bg-ink-850/50 px-5 py-4 text-left transition-colors hover:border-ink-600"
-          >
-            <span
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white"
-              style={{ backgroundColor: `${tpl.color}33`, color: tpl.color }}
-            >
-              {tpl.icon}
-            </span>
-            <span className="min-w-0">
-              <span className="block text-sm font-semibold text-fg">{tpl.name}</span>
-              <span className="block truncate text-xs text-fg-secondary">{tpl.description}</span>
-            </span>
-          </button>
-        ))}
-      </div>
+      {canManageForms && (
+        <>
+          <p className="mb-2.5 mt-6 text-xs font-semibold uppercase tracking-wider text-fg-muted">Templates</p>
+          <div className="grid grid-cols-3 gap-4 max-md:grid-cols-1">
+            {TEMPLATES.map((tpl) => (
+              <button
+                key={tpl.key}
+                onClick={() => setTemplate(tpl)}
+                className="flex items-center gap-4 rounded-2xl border border-ink-700 bg-ink-850/50 px-5 py-4 text-left transition-colors hover:border-ink-600"
+              >
+                <span
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white"
+                  style={{ backgroundColor: `${tpl.color}33`, color: tpl.color }}
+                >
+                  {tpl.icon}
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-fg">{tpl.name}</span>
+                  <span className="block truncate text-xs text-fg-secondary">{tpl.description}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
       {/* Search + table */}
       <div className="mt-7 flex items-center justify-between">
@@ -198,7 +212,7 @@ export default function FormsPage() {
                 key={form.id}
                 className="grid cursor-pointer items-center gap-2 border-b border-ink-700/60 bg-ink-900 px-4 py-2.5 transition-colors last:border-b-0 hover:bg-ink-850"
                 style={{ gridTemplateColumns: 'minmax(220px,1.5fr) minmax(140px,1fr) 110px 110px 110px 40px' }}
-                onClick={() => navigate(`/app/forms/${form.id}`)}
+                onClick={() => navigate(canManageForms ? `/app/forms/${form.id}` : `/app/forms/${form.id}/fill`)}
               >
                 <span className="flex min-w-0 items-center gap-2.5">
                   <ClipboardCheck size={15} className={cn('shrink-0', form.is_active ? 'text-brand' : 'text-fg-muted')} />
@@ -232,19 +246,23 @@ export default function FormsPage() {
                         <button className="menu-item" onClick={() => { close(); navigate(`/app/forms/${form.id}/fill`) }}>
                           <PenLine size={14} /> Fill out
                         </button>
-                        <button className="menu-item" onClick={() => { close(); navigate(`/app/forms/${form.id}`) }}>
-                          <ClipboardCheck size={14} /> Open builder
-                        </button>
                         <button className="menu-item" onClick={() => { close(); void copyLink(form) }}>
-                          <Copy size={14} /> Copy public link
+                          <Copy size={14} /> Copy link
                         </button>
-                        <div className="my-1 h-px bg-ink-700" />
-                        <button
-                          className="menu-item text-red-400 hover:text-red-300"
-                          onClick={() => { close(); void remove(form) }}
-                        >
-                          <Trash2 size={14} /> Delete
-                        </button>
+                        {canManageForms && (
+                          <>
+                            <button className="menu-item" onClick={() => { close(); navigate(`/app/forms/${form.id}`) }}>
+                              <ClipboardCheck size={14} /> Open builder
+                            </button>
+                            <div className="my-1 h-px bg-ink-700" />
+                            <button
+                              className="menu-item text-red-400 hover:text-red-300"
+                              onClick={() => { close(); void remove(form) }}
+                            >
+                              <Trash2 size={14} /> Delete
+                            </button>
+                          </>
+                        )}
                       </>
                     )}
                   </Dropdown>
@@ -256,7 +274,7 @@ export default function FormsPage() {
       )}
 
       <CreateFormModal
-        open={createOpen || template !== null}
+        open={canManageForms && (createOpen || template !== null)}
         template={template}
         onClose={() => {
           params.delete('new')
@@ -321,6 +339,15 @@ function CreateFormModal({
           placeholder="Form name"
           value={effectiveName}
           onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (
+              e.key === 'Enter' &&
+              effectiveName.trim() &&
+              (projects.data ?? []).length > 0 &&
+              !create.isPending
+            )
+              create.mutate()
+          }}
         />
         <div>
           <label className="mb-1.5 block text-xs font-medium text-fg-secondary">Submissions create tasks in</label>

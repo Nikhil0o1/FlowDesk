@@ -1,11 +1,34 @@
 import { useQuery } from '@tanstack/react-query'
-import { Clock4, Hash, Mail, MessageSquare, Upload, X, Zap } from 'lucide-react'
+import {
+  Boxes,
+  Clock4,
+  FolderKanban,
+  Hash,
+  Layers,
+  Mail,
+  MessageSquare,
+  Shield,
+  Trash2,
+  Upload,
+  User,
+  X,
+  Zap,
+} from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
-import type { Activity, Page, Task, User } from '../../lib/types'
+import { usePresencePreferenceStore } from '../../lib/presence'
+import { useUserRoles } from '../../lib/queries'
+import { sprintPageUrl } from '../../lib/sprintRoutes'
+import {
+  adminProjectRoles,
+  adminSpaceRoles,
+  adminWorkspaceRoles,
+  profileRoleDisplay,
+} from '../../lib/scopedRoles'
+import type { Activity, Page, Task, User as AppUser, UserRoleSummary } from '../../lib/types'
 import { cn, timeAgo } from '../../lib/utils'
 import { displayName, useAuthStore } from '../../stores/auth'
 import { toast } from '../../stores/toast'
@@ -14,9 +37,10 @@ import { Avatar } from '../ui/Avatar'
 import { Dropdown } from '../ui/Dropdown'
 import { PriorityFlag, StatusPill } from '../ui/badges'
 import { Spinner } from '../ui/Spinner'
+import { UserStatusEditor, UserStatusLine } from './UserStatusEditor'
 
 const AVATAR_COLORS = [
-  '#8C5BFF', '#4285F4', '#26B5CE', '#0F9D58', '#4CB782', '#FBBC04', '#F2994A',
+  '#2B88EE', '#4285F4', '#26B5CE', '#0F9D58', '#4CB782', '#FBBC04', '#F2994A',
   '#E5484D', '#E667A8', '#B07BE0', '#A1887F', '#87909E', '#ECECEE',
 ]
 
@@ -24,16 +48,18 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
   const { user, setUser } = useAuthStore()
   const navigate = useNavigate()
   const [tab, setTab] = useState<'activity' | 'tasks'>('activity')
-  const [status, setStatus] = useState('')
+  const [fullName, setFullName] = useState('')
   const [about, setAbout] = useState('')
+  const [editingName, setEditingName] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (open) {
-      setStatus(user?.profile?.status_text ?? '')
+      setFullName(user?.profile?.full_name ?? '')
       setAbout(user?.profile?.about ?? '')
+      setEditingName(false)
     }
-  }, [open, user?.profile?.status_text, user?.profile?.about])
+  }, [open, user?.profile?.full_name, user?.profile?.about])
 
   useEffect(() => {
     if (!open) return
@@ -58,23 +84,50 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
 
   const name = displayName(user)
   const tint = user.profile?.avatar_color
+  const hasUploadedAvatar = !!user.profile?.avatar_url
 
   const patchProfile = async (body: Record<string, unknown>) => {
     try {
-      const updated = await api.patch<User>('/users/me/profile', body)
+      const updated = await api.patch<AppUser>('/users/me/profile', body)
       setUser(updated)
+      if ('status_text' in body || 'clear_status' in body) {
+        await usePresencePreferenceStore.getState().applyFromProfileStatus(updated.profile?.status_text)
+      }
     } catch (err) {
       toast.error(errorMessage(err))
     }
+  }
+
+  const saveName = () => {
+    const next = fullName.trim()
+    if (!next) {
+      setFullName(user.profile?.full_name ?? '')
+      setEditingName(false)
+      return
+    }
+    if (next !== (user.profile?.full_name ?? '')) {
+      void patchProfile({ full_name: next })
+    }
+    setEditingName(false)
   }
 
   const uploadAvatar = async (file: File) => {
     try {
       const form = new FormData()
       form.append('file', file)
-      const updated = await api.upload<User>('/users/me/avatar', form)
+      const updated = await api.upload<AppUser>('/users/me/avatar', form)
       setUser(updated)
       toast.success('Avatar updated')
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  const deleteAvatar = async () => {
+    try {
+      const updated = await api.delete<AppUser>('/users/me/avatar')
+      setUser(updated)
+      toast.success('Avatar removed')
     } catch (err) {
       toast.error(errorMessage(err))
     }
@@ -106,12 +159,19 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
         <div className="p-6">
           {/* Header */}
           <div className="flex items-start gap-4">
-            {/* Avatar + color/upload popover (like the reference) */}
             <Dropdown
               width="w-56"
               trigger={
                 <button className="rounded-2xl transition-transform hover:scale-[1.03]" title="Change avatar">
-                  <Avatar name={name} src={user.profile?.avatar_url} color={tint} size={76} />
+                  <Avatar
+                    name={name}
+                    src={user.profile?.avatar_url}
+                    color={tint}
+                    size={76}
+                    userId={user.id}
+                    showPresence
+                    statusText={user.profile?.status_text}
+                  />
                 </button>
               }
             >
@@ -139,8 +199,19 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
                       fileRef.current?.click()
                     }}
                   >
-                    <Upload size={14} /> Upload avatar
+                    <Upload size={14} /> Upload photo
                   </button>
+                  {hasUploadedAvatar && (
+                    <button
+                      className="menu-item text-red-400 hover:text-red-300"
+                      onClick={() => {
+                        close()
+                        void deleteAvatar()
+                      }}
+                    >
+                      <Trash2 size={14} /> Remove photo
+                    </button>
+                  )}
                 </div>
               )}
             </Dropdown>
@@ -157,7 +228,34 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
             />
 
             <div className="min-w-0 flex-1 pt-1">
-              <h2 className="truncate text-lg font-bold text-fg">{name}</h2>
+              {editingName ? (
+                <input
+                  autoFocus
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  onBlur={saveName}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveName()
+                    if (e.key === 'Escape') {
+                      setFullName(user.profile?.full_name ?? '')
+                      setEditingName(false)
+                    }
+                  }}
+                  placeholder="Your name"
+                  className="w-full rounded-lg border border-brand bg-ink-850 px-2 py-1 text-lg font-bold text-fg outline-none"
+                  maxLength={200}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setEditingName(true)}
+                  className="group flex max-w-full items-center gap-1.5 text-left"
+                  title="Click to edit name"
+                >
+                  <h2 className="truncate text-lg font-bold text-fg">{name}</h2>
+                  <User size={14} className="shrink-0 text-fg-muted opacity-0 transition-opacity group-hover:opacity-100" />
+                </button>
+              )}
               <input
                 value={about}
                 onChange={(e) => setAbout(e.target.value)}
@@ -166,26 +264,15 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
                 placeholder="Add description…"
                 className="mt-0.5 w-full bg-transparent text-sm text-fg-secondary outline-none placeholder:text-fg-muted"
               />
-              <p className="mt-1 flex items-center gap-1.5 text-xs text-emerald-400">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Online
-              </p>
+              <UserStatusLine status={user.profile?.status_text} />
             </div>
           </div>
 
           {/* Status */}
           <div className="mt-4">
-            <input
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              onBlur={() => {
-                const next = status.trim()
-                if (next !== (user.profile?.status_text ?? '')) {
-                  void patchProfile(next ? { status_text: next } : { clear_status: true })
-                }
-              }}
-              onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-              placeholder="😶 Set status…"
-              className="w-full rounded-xl border border-ink-700 bg-ink-850 px-3.5 py-2 text-sm text-fg outline-none transition-colors placeholder:text-fg-muted focus:border-brand"
+            <UserStatusEditor
+              value={user.profile?.status_text}
+              onSave={(status) => patchProfile(status ? { status_text: status } : { clear_status: true })}
             />
           </div>
 
@@ -194,7 +281,13 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
             <button className="btn-secondary !py-1.5 text-xs" onClick={() => { onClose(); navigate('/app/chat') }}>
               <MessageSquare size={13} /> Chat
             </button>
-            <button className="btn-secondary !py-1.5 text-xs" onClick={() => { onClose(); navigate('/app/sprints') }}>
+            <button
+              className="btn-secondary !py-1.5 text-xs"
+              onClick={() => {
+                onClose()
+                navigate(sprintPageUrl({ tab: 'standups' }))
+              }}
+            >
               <Zap size={13} /> Standups
             </button>
           </div>
@@ -211,7 +304,6 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
 
           {tab === 'activity' ? (
             <div className="pt-4">
-              {/* Info rows */}
               <div className="space-y-2.5 border-b border-ink-700 pb-4">
                 <InfoRow icon={<Mail size={14} />}>{user.email}</InfoRow>
                 <InfoRow icon={<Clock4 size={14} />}>
@@ -220,7 +312,8 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
                 </InfoRow>
               </div>
 
-              {/* Activity feed */}
+              <RolesSection />
+
               <p className="pb-1 pt-4 text-xs font-semibold uppercase tracking-wider text-fg-muted">Activity</p>
               {activity.isLoading ? (
                 <div className="flex justify-center py-8">
@@ -292,7 +385,7 @@ export function ProfileDrawer({ open, onClose }: { open: boolean; onClose: () =>
                     className="w-full px-2.5 py-2 text-left text-xs font-medium text-brand hover:text-brand-hover"
                     onClick={() => {
                       onClose()
-                      navigate('/app/list')
+                      navigate('/app/my-tasks/assigned')
                     }}
                   >
                     View all tasks
@@ -328,5 +421,138 @@ function InfoRow({ icon, children }: { icon: React.ReactNode; children: React.Re
       <span className="text-fg-muted">{icon}</span>
       {children}
     </p>
+  )
+}
+
+function RolesSection() {
+  const { data: roles } = useUserRoles()
+
+  if (!roles) return null
+
+  const summary = profileRoleDisplay(roles)
+  const wsAdminRoles = adminWorkspaceRoles(roles)
+  const spaceAdminRoles = adminSpaceRoles(roles)
+  const projectAdminRoles = adminProjectRoles(roles)
+  const projectMemberRoles = roles.project_roles.filter((p) => p.role === 'member')
+  const projectViewerRoles = roles.project_roles.filter((p) => p.role === 'viewer')
+  const hasScopedRoles =
+    wsAdminRoles.length > 0 ||
+    spaceAdminRoles.length > 0 ||
+    projectAdminRoles.length > 0 ||
+    projectMemberRoles.length > 0 ||
+    projectViewerRoles.length > 0
+
+  return (
+    <div className="border-b border-ink-700 pb-4 pt-4">
+      <div className="flex items-center gap-2">
+        <Shield size={14} className="text-fg-muted" />
+        <p className="flex-1 text-xs font-semibold uppercase tracking-wider text-fg-muted">Your roles</p>
+      </div>
+
+      <div className="mt-2 space-y-2">
+        <RoleBadge icon={<Shield size={12} />} label={summary.title} detail={summary.detail} accent="brand" />
+
+        {/* Full per-scope breakdown: every role this person holds, everywhere. */}
+        {hasScopedRoles && (
+          <div className="space-y-2 rounded-lg border border-ink-700 bg-ink-900/50 p-2.5">
+            {wsAdminRoles.length > 0 && (
+              <ScopedRoleGroup
+                icon={<Boxes size={11} />}
+                title={`Workspace Admin (${wsAdminRoles.length})`}
+                items={wsAdminRoles.map((wr) => wr.workspace_name)}
+                chipClass="bg-brand/10 text-brand dark:bg-brand/15"
+              />
+            )}
+            {spaceAdminRoles.length > 0 && (
+              <ScopedRoleGroup
+                icon={<Layers size={11} />}
+                title={`Space Admin (${spaceAdminRoles.length})`}
+                items={spaceAdminRoles.map((sr) => `${sr.space_name} · ${sr.workspace_name}`)}
+                chipClass="bg-brand/10 text-brand dark:bg-brand/15"
+              />
+            )}
+            {projectAdminRoles.length > 0 && (
+              <ScopedRoleGroup
+                icon={<FolderKanban size={11} />}
+                title={`Project Admin (${projectAdminRoles.length})`}
+                items={projectAdminRoles.map((pr) =>
+                  pr.space_name ? `${pr.project_name} · ${pr.space_name}` : pr.project_name,
+                )}
+                chipClass="bg-brand/10 text-brand dark:bg-brand/15"
+              />
+            )}
+            {projectMemberRoles.length > 0 && (
+              <ScopedRoleGroup
+                icon={<FolderKanban size={11} />}
+                title={`Project Member (${projectMemberRoles.length})`}
+                items={projectMemberRoles.map((pr) =>
+                  pr.space_name ? `${pr.project_name} · ${pr.space_name}` : pr.project_name,
+                )}
+                chipClass="bg-gray-100 text-gray-600 dark:bg-ink-750 dark:text-fg-secondary"
+              />
+            )}
+            {projectViewerRoles.length > 0 && (
+              <ScopedRoleGroup
+                icon={<FolderKanban size={11} />}
+                title={`Project Viewer (${projectViewerRoles.length})`}
+                items={projectViewerRoles.map((pr) =>
+                  pr.space_name ? `${pr.project_name} · ${pr.space_name}` : pr.project_name,
+                )}
+                chipClass="bg-gray-100 text-gray-500 dark:bg-ink-750 dark:text-fg-muted"
+              />
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ScopedRoleGroup({
+  icon,
+  title,
+  items,
+  chipClass,
+}: {
+  icon: React.ReactNode
+  title: string
+  items: string[]
+  chipClass: string
+}) {
+  return (
+    <div>
+      <p className="flex items-center gap-1.5 text-[11px] font-medium text-fg-muted">
+        {icon} {title}
+      </p>
+      <div className="mt-1 flex flex-wrap gap-1">
+        {items.map((item) => (
+          <span key={item} className={cn('max-w-full truncate rounded-md px-2 py-0.5 text-xs font-medium', chipClass)}>
+            {item}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function RoleBadge({
+  icon,
+  label,
+  detail,
+  accent,
+}: {
+  icon: React.ReactNode
+  label: string
+  detail?: string | null
+  accent: string
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-lg bg-ink-800 px-3 py-2">
+      <span className="text-brand">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-fg">{label}</p>
+        {detail && <p className="text-[11px] leading-snug text-fg-muted">{detail}</p>}
+      </div>
+    </div>
   )
 }

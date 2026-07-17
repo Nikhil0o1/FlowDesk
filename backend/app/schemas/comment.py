@@ -22,10 +22,32 @@ class CommentOut(ORMModel):
     author_id: uuid.UUID
     parent_comment_id: uuid.UUID | None = None
     body: str
+    github_comment_id: int | None = None
+    github_author_login: str | None = None
     created_at: datetime
     updated_at: datetime
     author: UserBrief | None = None
     reply_count: int = 0
+
+
+class AssignedItemOut(BaseModel):
+    """A comment/message @mention surfaced on the Assigned Comments page.
+
+    Unifies task-comment mentions (`source="task"`) and chat mentions
+    (`source="chat"`) so the page can filter across both sources.
+    """
+
+    id: uuid.UUID  # mention id
+    source: str  # "task" | "chat"
+    title: str  # task title or channel name
+    ref: str | None = None  # task ref (tasks only)
+    context: str = ""  # project name (task) or "Chat"
+    preview: str
+    url: str  # in-app route to open the item
+    person: UserBrief | None = None  # assigner (assigned to me) / assignee (delegated by me)
+    at: datetime
+    priority: str | None = None
+    status: str = "pending"
 
 
 class NotificationOut(ORMModel):

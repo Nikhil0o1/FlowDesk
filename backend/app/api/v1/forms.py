@@ -8,7 +8,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_permissions
-from app.core.rate_limit import limiter
+from app.core.task_ref import format_task_ref
+from app.core.rate_limit import limiter, trusted_client_ip
 from app.db.session import get_db
 from app.models.form import Form, FormSubmission
 from app.models.organization import Organization
@@ -26,6 +27,7 @@ from app.schemas.form import (
 )
 from app.services import task_service
 from app.services.activity_service import log_activity
+from app.services.captcha_service import verify_turnstile
 from app.services.permission_service import PermissionService
 
 router = APIRouter(tags=["forms"])
@@ -36,6 +38,13 @@ DEFAULT_FIELDS = [
 ]
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _public_form_rate_key(request: Request) -> str:
+    token = request.path_params.get("token")
+    if token:
+        return f"form:{token}"
+    return trusted_client_ip(request)
 
 
 def _form_out(db: Session, form: Form) -> FormOut:
@@ -52,7 +61,7 @@ def _get_form(db: Session, perms: PermissionService, form_id: uuid.UUID) -> Form
     form = db.get(Form, form_id)
     if not form or form.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Form not found")
-    perms.require_workspace_member(form.workspace_id)
+    perms.require_project_view(form.project_id)
     return form
 
 
@@ -62,12 +71,18 @@ def list_forms(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    perms.require_workspace_member(workspace_id)
-    forms = db.scalars(
-        select(Form)
-        .where(Form.workspace_id == workspace_id, Form.deleted_at.is_(None))
-        .order_by(Form.created_at.desc())
-    ).all()
+    workspace = perms.require_workspace_member(workspace_id)
+    query = select(Form).where(Form.workspace_id == workspace_id, Form.deleted_at.is_(None))
+    can_manage_forms = (
+        perms.org_role(workspace.organization_id) == "owner"
+        or perms.workspace_role(workspace_id) in ("admin", "owner")
+    )
+    if not can_manage_forms:
+        project_ids = perms.accessible_project_ids()
+        if not project_ids:
+            return []
+        query = query.where(Form.project_id.in_(project_ids))
+    forms = db.scalars(query.order_by(Form.created_at.desc())).all()
     return [_form_out(db, f) for f in forms]
 
 
@@ -78,8 +93,8 @@ def create_form(
     db: Session = Depends(get_db),
     perms: PermissionService = Depends(get_permissions),
 ):
-    perms.require_workspace_member(workspace_id)
-    project = perms.require_project_edit(body.project_id)
+    perms.require_workspace_admin(workspace_id)
+    project = perms.require_project_view(body.project_id)
     if project.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Project is not in this workspace")
     form = Form(
@@ -117,7 +132,7 @@ def update_form(
     perms: PermissionService = Depends(get_permissions),
 ):
     form = _get_form(db, perms, form_id)
-    perms.require_project_edit(form.project_id)
+    perms.require_workspace_admin(form.workspace_id)
     changes = body.model_dump(exclude_unset=True)
     for field, value in changes.items():
         if value is not None:
@@ -133,8 +148,7 @@ def delete_form(
     perms: PermissionService = Depends(get_permissions),
 ):
     form = _get_form(db, perms, form_id)
-    if form.created_by != perms.user.id:
-        perms.require_project_admin(form.project_id)
+    perms.require_workspace_admin(form.workspace_id)
     form.deleted_at = datetime.now(timezone.utc)
     db.commit()
     return Message(detail="Form deleted")
@@ -149,6 +163,7 @@ def list_submissions(
     perms: PermissionService = Depends(get_permissions),
 ):
     form = _get_form(db, perms, form_id)
+    perms.require_workspace_admin(form.workspace_id)
     base = select(FormSubmission).where(FormSubmission.form_id == form.id)
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     rows = db.scalars(
@@ -162,17 +177,19 @@ def list_submissions(
         if sub.task_id and project:
             task = db.get(Task, sub.task_id)
             if task:
-                out.task_ref = f"{project.key}-{task.number}"
+                out.task_ref = format_task_ref(project.id, task.number)
         items.append(out)
     return Page(items=items, total=total, page=page, page_size=page_size)
 
 
-# ---------------- Public endpoints (no auth) ----------------
+# ---------------- Token endpoints ----------------
 
-def _public_form(db: Session, token: str) -> Form:
+def _public_form(db: Session, token: str, *, require_active: bool = True) -> Form:
     form = db.scalar(select(Form).where(Form.public_token == token, Form.deleted_at.is_(None)))
-    if not form or not form.is_active:
+    if not form:
         raise HTTPException(status_code=404, detail="This form is not available")
+    if require_active and not form.is_active:
+        raise HTTPException(status_code=404, detail="This form is paused")
     workspace = db.get(Workspace, form.workspace_id)
     if not workspace or workspace.deleted_at is not None:
         raise HTTPException(status_code=404, detail="This form is not available")
@@ -184,14 +201,20 @@ def _public_form(db: Session, token: str) -> Form:
 
 @router.get("/public/forms/{token}", response_model=PublicFormOut)
 @limiter.limit("60/minute")
-def public_form(request: Request, token: str, db: Session = Depends(get_db)):
-    form = _public_form(db, token)
+def public_form(
+    request: Request,
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Unauthenticated read of a form shared via public link."""
+    form = _public_form(db, token, require_active=False)
     workspace = db.get(Workspace, form.workspace_id)
     return PublicFormOut(
         name=form.name,
         description=form.description,
         fields=form.fields,
         workspace_name=workspace.name if workspace else "",
+        is_active=form.is_active,
     )
 
 
@@ -223,6 +246,15 @@ def _process_submission(
                     raise HTTPException(status_code=422, detail=f"'{field['label']}' must be a date")
             if field["type"] == "select" and value not in [str(o) for o in field.get("options", [])]:
                 raise HTTPException(status_code=422, detail=f"'{field['label']}' has an invalid option")
+            if field["type"] == "checklist":
+                allowed = {str(o) for o in field.get("options", [])}
+                selected = [s.strip() for s in value.split("\n") if s.strip()]
+                if not selected:
+                    raise HTTPException(status_code=422, detail=f"'{field['label']}' has an invalid option")
+                if any(s not in allowed for s in selected):
+                    raise HTTPException(status_code=422, detail=f"'{field['label']}' has an invalid option")
+                # Store as human-readable list for task description / submissions UI
+                value = ", ".join(selected)
             values[fid] = value
 
     title_field = form.fields[0]
@@ -264,17 +296,25 @@ def _process_submission(
     )
     task_service.emit_task_event("task.created", db, project, task, {"via_form": form.name})
     db.commit()
-    return task, f"{project.key}-{task.number}"
+    return task, format_task_ref(project.id, task.number)
 
 
 @router.post("/public/forms/{token}", response_model=Message, status_code=201)
 @limiter.limit("10/minute")
+@limiter.limit("5/minute", key_func=_public_form_rate_key)
 def submit_public_form(
     request: Request,
     token: str,
     body: PublicSubmission,
     db: Session = Depends(get_db),
 ):
+    """Unauthenticated submission via public link."""
+    if body.website and body.website.strip():
+        return Message(detail="Thanks! Your submission has been received.")
+    verify_turnstile(
+        body.captcha_token,
+        request.client.host if request.client else None,
+    )
     form = _public_form(db, token)
     _process_submission(db, form, body.values, body.submitter_email)
     return Message(detail="Thanks! Your submission has been received.")
@@ -289,5 +329,6 @@ def submit_form_as_member(
 ):
     """In-app submission by a workspace member (works even while the public link is paused)."""
     form = _get_form(db, perms, form_id)
+    perms.require_project_view(form.project_id)
     task, ref = _process_submission(db, form, body.values, perms.user.email)
     return {"detail": "Submission received", "task_id": str(task.id), "task_ref": ref}

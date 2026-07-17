@@ -123,5 +123,5 @@ python -m app.workers.scheduler
 | `password authentication failed` on migrate | Check `DATABASE_URL` in the **root** `.env` — port 5432 = local install, 5433 = docker |
 | Emails not arriving | Is Mailpit running? `docker compose up -d mailpit`, inbox at :8025 |
 | 429 Too Many Requests on login | Rate limiter (10/min/IP) — wait a minute, or `RATE_LIMIT_ENABLED=false` (dev only) |
-| WebSocket won't connect | It authenticates with the access token; make sure you're logged in and using the Vite proxy origin |
+| WebSocket won't connect | App path: mint a ticket via `POST /api/v1/ws/ticket` (session JWT), then connect with `?ticket=`. Integration path: Bearer PAT with `realtime:read`. Ensure Redis is up in multi-worker deploys. |
 | Google button says not configured | Set both `GOOGLE_CLIENT_ID` and `VITE_GOOGLE_CLIENT_ID`, restart `npm run dev` |

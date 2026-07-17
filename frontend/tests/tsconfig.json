@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["vitest/globals", "@testing-library/jest-dom", "node"],
+    "baseUrl": "..",
+    "paths": {
+      "@/*": ["src/*"],
+      "@tests/*": ["tests/helpers/*"]
+    }
+  },
+  "include": ["./**/*.ts", "./**/*.tsx"]
+}

@@ -14,14 +14,12 @@ class Organization(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "organizations"
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
-    slug: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
     logo_url: Mapped[str | None] = mapped_column(Text)
     is_disabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     settings: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    # Billing placeholders (superadmin-visible metadata)
-    plan: Mapped[str] = mapped_column(String(40), default="free", nullable=False)
-    seats: Mapped[int] = mapped_column(default=10, nullable=False)
+    # When true, members must pass TOTP 2FA on email-code login (SSO uses the IdP's MFA)
+    require_2fa: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class OrganizationMember(Base, UUIDPkMixin, TimestampMixin):

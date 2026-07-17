@@ -160,7 +160,26 @@ POST `/tasks/{id}/attachments` (multipart `file`; size/MIME/extension validated)
 | GET `/admin/audit-logs?action=` | Platform-wide audit trail |
 | GET `/admin/cron-logs?job_name=` | Cron execution history |
 
-## WebSocket — `GET /api/v1/ws?token=<access_token>`
+## WebSocket realtime
+
+### In-app (browser) — `POST /api/v1/ws/ticket` then `GET /api/v1/ws?ticket=<ticket>`
+
+1. Authenticate with a **session JWT** (`Authorization: Bearer <access_token>`).
+2. `POST /api/v1/ws/ticket` → `{ ticket, expires_in }` (single-use, ~60s TTL; Redis-backed when `REDIS_URL` is set).
+3. Connect: `wss://<api-host>/api/v1/ws?ticket=<ticket>` (never put the JWT in the URL).
+4. Browser `Origin` must match the CORS allowlist in production.
+
+Personal access tokens **cannot** mint tickets (`403`).
+
+### Integration (external SaaS) — `GET /api/v1/integrations/ws`
+
+Requires API key scope `realtime:read`.
+
+- Prefer `Authorization: Bearer fd_live_…` on the WebSocket upgrade.
+- Fallback: connect, then send `{"type":"auth","token":"fd_live_…"}` within ~10s.
+- Metadata: `GET /api/v1/integrations/realtime` (same scope).
+
+Idle connections without inbound messages (including `ping`) are closed after ~90s.
 
 Server→client envelope:
 
@@ -168,6 +187,13 @@ Server→client envelope:
 { "type": "task.updated", "workspace_id": "…", "project_id": "…", "task_id": "…", "payload": { } }
 ```
 
-Types: `presence.state|online|offline`, `task.created|updated|deleted|assigned`, `comment.created|updated|deleted`, `mention.created`, `notification.created`, `chat.message.created`, `chat.typing`, `chat.read`, `timer.started|stopped`, `sprint.updated`, `github.event.created`, `pong`.
+Types include: `presence.state|online|offline`, `task.created|updated|deleted|assigned`, `comment.created|updated|deleted`, `mention.created`, `notification.created`, `chat.message.created|updated|deleted`, `chat.typing`, `chat.read`, `channel.*`, `timer.started|stopped`, `sprint.updated`, `github.event.created`, `doc.*`, `whiteboard.*`, `pong`, `connected` (integration), `subscribed` / `unsubscribed`.
 
-Client→server: `{"type":"ping"}`, `{"type":"chat.typing","channel_id":…}`, `{"type":"subscribe.channel","channel_id":…}` (membership verified).
+Client→server:
+
+- `{"type":"ping"}` → `pong`
+- `{"type":"subscribe","resource":"project","id":"<uuid>"}` (also `workspace` / `channel` / `whiteboard`) — permission-checked
+- `{"type":"unsubscribe","resource":"…","id":"…"}`
+- App only: `chat.typing`, `subscribe.channel`, `whiteboard.subscribe`, `whiteboard.cursor`, `whiteboard.scene`
+
+Close codes: `4401` auth, `4403` origin, `4008` rate limit, `4010` connection cap, `4000` idle timeout.

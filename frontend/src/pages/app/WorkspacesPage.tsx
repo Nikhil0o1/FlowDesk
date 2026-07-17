@@ -1,32 +1,56 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Archive, Briefcase, Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useCallback, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
 import { useCurrentContext } from '../../lib/queries'
+import { useQueryFlagModal } from '../../lib/useQueryFlagModal'
+import { useResetFormWhenOpen } from '../../lib/useResetFormWhenOpen'
+import { useRealtime } from '../../lib/ws'
 import type { Workspace } from '../../lib/types'
 import { formatDate } from '../../lib/utils'
 import { toast } from '../../stores/toast'
 import { useWorkspaceStore } from '../../stores/workspace'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Modal } from '../../components/ui/Modal'
+import { RenameModal } from '../../components/ui/RenameModal'
+import { RenameButton } from '../../components/ui/RenameButton'
 import { CenteredSpinner } from '../../components/ui/Spinner'
 
-const COLORS = ['#8C5BFF', '#E5484D', '#F2994A', '#4CB782', '#5B9FF0', '#B07BE0', '#E667A8', '#26B5CE']
+const COLORS = ['#2B88EE', '#E5484D', '#F2994A', '#4CB782', '#5B9FF0', '#07BEA3', '#E667A8', '#26B5CE']
 
 export default function WorkspacesPage() {
   const { org, workspaces, isLoading } = useCurrentContext()
   const setWorkspace = useWorkspaceStore((s) => s.setWorkspace)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [params] = useSearchParams()
-  const [createOpen, setCreateOpen] = useState(params.get('new') === '1')
+  const { isOpen: createOpen, open: openCreate, close: closeCreate } = useQueryFlagModal()
+  const [renameWs, setRenameWs] = useState<Workspace | null>(null)
+  const [renaming, setRenaming] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [color, setColor] = useState(COLORS[0])
 
-  const isOwner = org?.my_role === 'owner'
+  const resetForm = useCallback(() => {
+    setName('')
+    setDescription('')
+    setColor(COLORS[0])
+  }, [])
+
+  useResetFormWhenOpen(createOpen, resetForm)
+
+  useRealtime('notification.created', (event) => {
+    const notificationType = event.payload.type
+    if (
+      notificationType === 'workspace_role_changed' ||
+      notificationType === 'workspace_member_removed'
+    ) {
+      void queryClient.invalidateQueries({ queryKey: ['workspaces', org?.id] })
+    }
+  })
+
+  const isOwner = org?.my_role === 'owner' || org?.my_role === 'admin'
 
   const create = useMutation({
     mutationFn: () =>
@@ -37,10 +61,8 @@ export default function WorkspacesPage() {
       }),
     onSuccess: (ws) => {
       toast.success('Workspace created')
-      void queryClient.invalidateQueries({ queryKey: ['workspaces'] })
-      setCreateOpen(false)
-      setName('')
-      setDescription('')
+      void queryClient.invalidateQueries({ queryKey: ['workspaces', org?.id] })
+      closeCreate()
       setWorkspace(ws.id)
       navigate(`/app/workspaces/${ws.id}`)
     },
@@ -50,7 +72,7 @@ export default function WorkspacesPage() {
   const archive = async (ws: Workspace) => {
     try {
       await api.post(`/workspaces/${ws.id}/${ws.is_archived ? 'unarchive' : 'archive'}`)
-      void queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspaces', org?.id] })
       toast.success(ws.is_archived ? 'Workspace restored' : 'Workspace archived')
     } catch (err) {
       toast.error(errorMessage(err))
@@ -61,26 +83,42 @@ export default function WorkspacesPage() {
     if (!window.confirm(`Delete workspace "${ws.name}"? This cannot be undone from the UI.`)) return
     try {
       await api.delete(`/workspaces/${ws.id}`)
-      void queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspaces', org?.id] })
       toast.success('Workspace deleted')
     } catch (err) {
       toast.error(errorMessage(err))
     }
   }
 
+  const renameWorkspace = async (name: string) => {
+    if (!renameWs) return
+    setRenaming(true)
+    try {
+      await api.patch(`/workspaces/${renameWs.id}`, { name })
+      void queryClient.invalidateQueries({ queryKey: ['workspaces', org?.id] })
+      void queryClient.invalidateQueries({ queryKey: ['workspace', renameWs.id] })
+      toast.success('Workspace renamed')
+      setRenameWs(null)
+    } catch (err) {
+      toast.error(errorMessage(err))
+    } finally {
+      setRenaming(false)
+    }
+  }
+
   if (isLoading) return <CenteredSpinner />
 
   return (
-    <div className="mx-auto max-w-5xl px-6 py-7">
+    <div className="mx-auto max-w-5xl px-6 py-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-fg">Workspaces</h1>
           <p className="mt-0.5 text-sm text-fg-secondary">
-            {org?.name} · your role: {org?.my_role ?? 'member'}
+            {org?.name}
           </p>
         </div>
         {isOwner && (
-          <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+          <button className="btn-primary" onClick={openCreate}>
             <Plus size={15} /> New workspace
           </button>
         )}
@@ -111,11 +149,12 @@ export default function WorkspacesPage() {
                   {ws.name[0].toUpperCase()}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="flex items-center gap-2 truncate text-sm font-semibold text-fg">
-                    {ws.name}
+                  <p className="group/name flex items-center gap-1 text-sm font-semibold text-fg">
+                    <span className="truncate">{ws.name}</span>
                     {ws.is_archived && (
-                      <span className="rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-fg-muted">Archived</span>
+                      <span className="shrink-0 rounded bg-ink-700 px-1.5 py-0.5 text-[10px] text-fg-muted">Archived</span>
                     )}
+                    {isOwner && <RenameButton onClick={() => setRenameWs(ws)} />}
                   </p>
                   <p className="mt-0.5 line-clamp-2 text-xs text-fg-secondary">{ws.description || 'No description'}</p>
                   <p className="mt-1.5 text-[11px] text-fg-muted">
@@ -123,7 +162,7 @@ export default function WorkspacesPage() {
                   </p>
                 </div>
                 {isOwner && (
-                  <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex shrink-0 gap-1 opacity-0 transition-opacity group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
                     <button className="btn-ghost !p-1.5" title={ws.is_archived ? 'Restore' : 'Archive'} onClick={() => archive(ws)}>
                       <Archive size={14} />
                     </button>
@@ -138,9 +177,9 @@ export default function WorkspacesPage() {
         </div>
       )}
 
-      <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create workspace" width="max-w-md">
+      <Modal open={createOpen} onClose={closeCreate} title="Create workspace" width="max-w-md">
         <div className="space-y-3">
-          <input className="input-dark" placeholder="Workspace name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          <input className="input-dark" placeholder="Workspace name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && name.trim() && !create.isPending) create.mutate() }} autoFocus />
           <textarea rows={2} className="input-dark resize-none" placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
           <div className="flex gap-2">
             {COLORS.map((c) => (
@@ -157,6 +196,16 @@ export default function WorkspacesPage() {
           </button>
         </div>
       </Modal>
+
+      <RenameModal
+        open={!!renameWs}
+        onClose={() => setRenameWs(null)}
+        title="Rename workspace"
+        label="Workspace name"
+        initialName={renameWs?.name ?? ''}
+        onSave={renameWorkspace}
+        saving={renaming}
+      />
     </div>
   )
 }

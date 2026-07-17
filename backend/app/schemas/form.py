@@ -28,8 +28,12 @@ def _validate_fields(fields: list) -> list:
             raise ValueError(f"Unknown field type: {ftype}")
         if not label:
             raise ValueError("Each field needs a label")
-        if ftype == "select" and not isinstance(field.get("options"), list):
-            raise ValueError("Select fields need an options list")
+        if ftype in ("select", "checklist") and not isinstance(field.get("options"), list):
+            raise ValueError(f"{ftype.capitalize()} fields need an options list")
+        if ftype in ("select", "checklist"):
+            opts = field.get("options") or []
+            if not opts or not all(str(o).strip() for o in opts):
+                raise ValueError(f"{ftype.capitalize()} fields need at least one non-empty option")
     first = fields[0]
     if first.get("type") != "text":
         raise ValueError("The first field must be a text field (task name)")
@@ -87,8 +91,12 @@ class PublicFormOut(BaseModel):
     description: str | None = None
     fields: list
     workspace_name: str
+    is_active: bool = True
 
 
 class PublicSubmission(BaseModel):
     values: dict = Field(default_factory=dict)
     submitter_email: str | None = Field(default=None, max_length=320)
+    captcha_token: str | None = Field(default=None, max_length=4096)
+    # Honeypot — must stay empty; bots that fill it are silently dropped.
+    website: str | None = Field(default=None, max_length=200)

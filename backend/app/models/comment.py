@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import ForeignKey, Text
+from sqlalchemy import BigInteger, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -20,6 +20,8 @@ class Comment(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
         UUID(as_uuid=True), ForeignKey("comments.id", ondelete="CASCADE"), index=True
     )
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    github_comment_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True)
+    github_author_login: Mapped[str | None] = mapped_column(String(255))
 
 
 class Mention(Base, UUIDPkMixin, TimestampMixin):
@@ -36,4 +38,7 @@ class Mention(Base, UUIDPkMixin, TimestampMixin):
     )
     chat_message_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chat_messages.id", ondelete="CASCADE"), index=True
+    )
+    document_comment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_comments.id", ondelete="CASCADE"), index=True
     )

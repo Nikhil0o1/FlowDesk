@@ -19,9 +19,9 @@ export function FullPageSpinner() {
   )
 }
 
-export function CenteredSpinner() {
+export function CenteredSpinner({ className }: { className?: string }) {
   return (
-    <div className="flex h-48 items-center justify-center">
+    <div className={cn('flex h-48 items-center justify-center', className)}>
       <Spinner className="h-6 w-6" />
     </div>
   )

@@ -1,11 +1,12 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, Presentation, Search, Trash2 } from 'lucide-react'
+import { ChevronDown, Copy, LayoutTemplate, Presentation, Search, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
-import { useCurrentContext, useWhiteboards } from '../../lib/queries'
+import { useCurrentContext, useProjects, useWhiteboards } from '../../lib/queries'
 import type { Whiteboard } from '../../lib/types'
+import { WHITEBOARD_TEMPLATES, templateScene, type WhiteboardTemplate } from '../../lib/whiteboardTemplates'
 import { timeAgo } from '../../lib/utils'
 import { useRealtime } from '../../lib/ws'
 import { useAuthStore } from '../../stores/auth'
@@ -23,9 +24,11 @@ export default function WhiteboardsPage() {
   const queryClient = useQueryClient()
   const [params, setParams] = useSearchParams()
   const [q, setQ] = useState('')
+  // A template chosen from the gallery opens the create dialog so a project can be picked.
+  const [template, setTemplate] = useState<WhiteboardTemplate | null>(null)
 
   const mineOnly = params.get('mine') === '1'
-  const createOpen = params.get('new') === '1'
+  const createOpen = params.get('new') === '1' || template !== null
 
   useRealtime(
     ['whiteboard.created', 'whiteboard.updated', 'whiteboard.deleted'],
@@ -50,6 +53,23 @@ export default function WhiteboardsPage() {
     }
   }
 
+  const duplicate = async (board: Whiteboard) => {
+    try {
+      const copy = await api.post<Whiteboard>(`/whiteboards/${board.id}/duplicate`)
+      toast.success('Whiteboard duplicated')
+      void queryClient.invalidateQueries({ queryKey: ['whiteboards', workspace?.id] })
+      navigate(`/app/whiteboards/${copy.id}`)
+    } catch (err) {
+      toast.error(errorMessage(err))
+    }
+  }
+
+  const closeCreate = () => {
+    setTemplate(null)
+    params.delete('new')
+    setParams(params, { replace: true })
+  }
+
   if (boards.isLoading) return <CenteredSpinner />
 
   return (
@@ -67,7 +87,33 @@ export default function WhiteboardsPage() {
         </button>
       </div>
 
-      <div className="relative mt-5 max-w-xs">
+      {/* Templates */}
+      <div className="mt-6">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-muted">Templates</p>
+        <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
+          {WHITEBOARD_TEMPLATES.map((t) => (
+            <button
+              key={t.key}
+              disabled={!workspace}
+              onClick={() => setTemplate(t)}
+              className="flex items-center gap-3 rounded-xl border border-ink-700 bg-ink-850/60 px-4 py-3 text-left transition-colors hover:border-ink-600 disabled:opacity-60"
+            >
+              <span
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
+                style={{ backgroundColor: `${t.accent}22` }}
+              >
+                <LayoutTemplate size={18} style={{ color: t.accent }} />
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold text-fg">{t.name}</span>
+                <span className="block truncate text-xs text-fg-muted">{t.description}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="relative mt-6 max-w-xs">
         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-fg-muted" />
         <input
           value={q}
@@ -105,25 +151,37 @@ export default function WhiteboardsPage() {
                     {board.element_count} element{board.element_count === 1 ? '' : 's'}
                   </span>
                 )}
-                {(board.created_by === user?.id ||
-                  workspace?.my_role === 'admin' ||
-                  workspace?.my_role === 'owner') && (
+                <div className="absolute right-2 top-2 hidden gap-1 group-hover:flex">
                   <button
-                    className="absolute right-2 top-2 hidden rounded-lg bg-ink-800 p-1.5 text-fg-muted hover:text-red-400 group-hover:block"
+                    className="rounded-lg bg-ink-800 p-1.5 text-fg-muted hover:text-fg"
                     onClick={(e) => {
                       e.stopPropagation()
-                      void remove(board)
+                      void duplicate(board)
                     }}
-                    title="Delete"
+                    title="Duplicate"
                   >
-                    <Trash2 size={13} />
+                    <Copy size={13} />
                   </button>
-                )}
+                  {board.can_delete && (
+                    <button
+                      className="rounded-lg bg-ink-800 p-1.5 text-fg-muted hover:text-red-400"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void remove(board)
+                      }}
+                      title="Delete"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="flex items-center gap-2.5 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-fg">{board.name}</p>
-                  <p className="text-[11px] text-fg-muted">Edited {timeAgo(board.updated_at)}</p>
+                  <p className="truncate text-[11px] text-fg-muted">
+                    {board.project_name ? `${board.project_name} · ` : ''}Edited {timeAgo(board.updated_at)}
+                  </p>
                 </div>
                 <Avatar
                   name={board.creator?.full_name || board.creator?.email || '?'}
@@ -136,49 +194,92 @@ export default function WhiteboardsPage() {
         </div>
       )}
 
-      <CreateWhiteboardModal
-        open={createOpen}
-        onClose={() => {
-          params.delete('new')
-          setParams(params, { replace: true })
-        }}
-      />
+      <CreateWhiteboardModal open={createOpen} template={template} onClose={closeCreate} />
     </div>
   )
 }
 
-function CreateWhiteboardModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function CreateWhiteboardModal({
+  open,
+  template,
+  onClose,
+}: {
+  open: boolean
+  template: WhiteboardTemplate | null
+  onClose: () => void
+}) {
   const { workspace } = useCurrentContext()
+  const projects = useProjects(workspace?.id)
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [name, setName] = useState('')
+  const [projectId, setProjectId] = useState('')
+
+  const projectList = projects.data ?? []
+  const effectiveName = name.trim() || template?.name || ''
+  const effectiveProjectId = projectId || projectList[0]?.id || ''
 
   const create = useMutation({
-    mutationFn: () => api.post<Whiteboard>(`/workspaces/${workspace!.id}/whiteboards`, { name: name.trim() }),
+    mutationFn: async () => {
+      const board = await api.post<Whiteboard>(`/workspaces/${workspace!.id}/whiteboards`, {
+        name: effectiveName,
+        project_id: effectiveProjectId,
+      })
+      if (template) {
+        await api.patch(`/whiteboards/${board.id}`, { content: await templateScene(template) })
+      }
+      return board
+    },
     onSuccess: (board) => {
       void queryClient.invalidateQueries({ queryKey: ['whiteboards', workspace?.id] })
       setName('')
+      setProjectId('')
       onClose()
       navigate(`/app/whiteboards/${board.id}`)
     },
     onError: (err) => toast.error(errorMessage(err)),
   })
 
+  const canSubmit = !!effectiveName && !!effectiveProjectId && !create.isPending
+
   return (
-    <Modal open={open} onClose={onClose} title="New Whiteboard" width="max-w-md">
-      <div className="space-y-3">
+    <Modal open={open} onClose={onClose} title={template ? `New from “${template.name}”` : 'New Whiteboard'} width="max-w-md">
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (canSubmit) create.mutate()
+        }}
+      >
         <input
           autoFocus
           className="input-dark"
           placeholder="Whiteboard name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && name.trim() && create.mutate()}
         />
-        <button className="btn-primary w-full" disabled={!name.trim() || create.isPending} onClick={() => create.mutate()}>
-          Create whiteboard
+        <div>
+          <label className="mb-1 block text-xs font-medium text-fg-muted">Project</label>
+          <select
+            className="input-dark"
+            value={effectiveProjectId}
+            onChange={(e) => setProjectId(e.target.value)}
+          >
+            {projectList.length === 0 && <option value="">No projects available</option>}
+            {projectList.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] text-fg-muted">
+            Only members of this project will be able to see or open the whiteboard.
+          </p>
+        </div>
+        <button type="submit" className="btn-primary w-full" disabled={!canSubmit}>
+          {template ? 'Create from template' : 'Create whiteboard'}
         </button>
-      </div>
+      </form>
     </Modal>
   )
 }

@@ -25,6 +25,7 @@ class UserOut(ORMModel):
     auth_provider: str
     last_login_at: datetime | None = None
     created_at: datetime
+    totp_enabled: bool = False
     profile: ProfileOut | None = None
 
 
@@ -42,7 +43,9 @@ class ProfileUpdate(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
     phone: str | None = Field(default=None, max_length=32)
     about: str | None = Field(default=None, max_length=2000)
-    avatar_url: str | None = None
+    # avatar_url is intentionally NOT settable here: a verbatim external URL would
+    # enable tracking/spoofing. Avatars are set server-side via POST /users/me/avatar
+    # (upload) or SSO. avatar_color is a preset accent, not a URL.
     avatar_color: str | None = Field(default=None, max_length=20)
     status_text: str | None = Field(default=None, max_length=140)
     clear_status: bool = False

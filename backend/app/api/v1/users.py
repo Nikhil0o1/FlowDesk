@@ -3,22 +3,29 @@ import os
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_permissions
+from app.core.rate_limit import limiter, upload_rate_key
 from app.db.session import get_db
 from app.models.activity import ActivityLog
 from app.models.user import Profile, User
+from app.schemas.dashboard import UserRoleSummary
 from app.schemas.project import ActivityOut
 from app.schemas.user import ProfileUpdate, UserOut
+from app.services.dashboard_service import resolve_user_roles
 from app.services.permission_service import PermissionService
-from app.services.storage_service import get_storage
+from app.services.storage_service import _sniff_mime, get_storage
+from app.services.upload_service import (
+    guard_upload_request,
+    max_avatar_bytes,
+    max_avatar_request_bytes,
+    read_bounded_upload,
+)
 
 router = APIRouter(prefix="/users", tags=["users"])
-
-MAX_AVATAR_BYTES = 2 * 1024 * 1024
 
 
 def _ensure_profile(db: Session, user: User) -> Profile:
@@ -27,6 +34,22 @@ def _ensure_profile(db: Session, user: User) -> Profile:
         db.add(profile)
         user.profile = profile
     return user.profile
+
+
+@router.get("/me/roles", response_model=UserRoleSummary)
+def my_roles(
+    db: Session = Depends(get_db),
+    perms: PermissionService = Depends(get_permissions),
+):
+    """Comprehensive role summary across all scopes for the current user."""
+    from app.models.organization import OrganizationMember
+
+    org_member = db.scalar(
+        select(OrganizationMember).where(OrganizationMember.user_id == perms.user.id).limit(1)
+    )
+    if not org_member:
+        return UserRoleSummary(highest_role="member")
+    return resolve_user_roles(db, perms, org_member.organization_id)
 
 
 @router.patch("/me/profile", response_model=UserOut)
@@ -49,17 +72,17 @@ def update_my_profile(
 
 
 @router.post("/me/avatar", response_model=UserOut)
+@limiter.limit("10/minute", key_func=upload_rate_key)
 async def upload_avatar(
+    request: Request,
     file: UploadFile,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Empty file")
-    if len(content) > MAX_AVATAR_BYTES:
-        raise HTTPException(status_code=413, detail="Avatar must be under 2MB")
-    if not (file.content_type or "").startswith("image/"):
+    guard_upload_request(request, max_avatar_request_bytes())
+    content = await read_bounded_upload(file, max_avatar_bytes())
+    sniffed = _sniff_mime(content)
+    if not sniffed or not sniffed.startswith("image/"):
         raise HTTPException(status_code=400, detail="Avatar must be an image")
 
     ext = os.path.splitext(file.filename or "")[1].lower() or ".png"
@@ -78,6 +101,24 @@ async def upload_avatar(
     profile.avatar_key = key
     # Cache-busting relative URL served by the public avatar endpoint below
     profile.avatar_url = f"/api/v1/users/{user.id}/avatar?v={int(time.time())}"
+    db.commit()
+    db.refresh(user)
+    return UserOut.model_validate(user)
+
+
+@router.delete("/me/avatar", response_model=UserOut)
+def delete_avatar(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    profile = _ensure_profile(db, user)
+    if profile.avatar_key:
+        try:
+            get_storage().delete(profile.avatar_key)
+        except Exception:  # noqa: BLE001
+            pass
+    profile.avatar_key = None
+    profile.avatar_url = None
     db.commit()
     db.refresh(user)
     return UserOut.model_validate(user)

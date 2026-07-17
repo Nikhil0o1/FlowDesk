@@ -1,17 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CalendarRange, CheckCircle2, MoreHorizontal, Pencil, Play, Plus, Target, Trash2, Zap } from 'lucide-react'
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { api, errorMessage } from '../../lib/api'
 import { useCurrentContext, useProjects, useSprints, useStatuses, useWorkspaceMembers } from '../../lib/queries'
-import type { Page, Sprint, SprintBurndown, Standup, Task } from '../../lib/types'
-import { cn, formatDate } from '../../lib/utils'
+import { parseSprintTab, type SprintTab } from '../../lib/sprintRoutes'
+import { useQueryFlagModal } from '../../lib/useQueryFlagModal'
+import { useResetFormWhenOpen } from '../../lib/useResetFormWhenOpen'
+import type {
+  Page,
+  RetrospectiveItem,
+  RetrospectiveItemCategory,
+  Sprint,
+  SprintBurndown,
+  SprintRetrospective,
+  Standup,
+  Task,
+} from '../../lib/types'
+import { cn, formatDate, minEndDateKey, minSelectableDateKey, todayDateKey } from '../../lib/utils'
 import { useRealtime } from '../../lib/ws'
 import { useAuthStore } from '../../stores/auth'
 import { toast } from '../../stores/toast'
 import { KanbanBoard } from '../../components/tasks/KanbanBoard'
+import { CreateGithubIssueToggle, useCreateGithubIssuePreference } from '../../components/github/CreateGithubIssueToggle'
 import { Avatar } from '../../components/ui/Avatar'
+import { DateInput } from '../../components/ui/DateInput'
 import { Dropdown } from '../../components/ui/Dropdown'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Modal } from '../../components/ui/Modal'
@@ -28,7 +42,7 @@ export default function SprintsPage() {
   const sprints = useSprints(workspace?.id)
   const [params, setParams] = useSearchParams()
   const queryClient = useQueryClient()
-  const [createOpen, setCreateOpen] = useState(params.get('new') === '1')
+  const { isOpen: createOpen, open: openCreate, close: closeCreate } = useQueryFlagModal()
 
   useRealtime('sprint.updated', () => {
     void queryClient.invalidateQueries({ queryKey: ['sprints', workspace?.id] })
@@ -49,7 +63,7 @@ export default function SprintsPage() {
         <div className="flex items-center justify-between px-4 py-3.5">
           <h2 className="text-sm font-bold text-fg">Sprints</h2>
           {canManage && (
-            <button className="btn-ghost !p-1.5" onClick={() => setCreateOpen(true)}>
+            <button className="btn-ghost !p-1.5" onClick={openCreate}>
               <Plus size={15} />
             </button>
           )}
@@ -106,7 +120,7 @@ export default function SprintsPage() {
             description="Create a sprint to start planning your iteration."
             action={
               canManage ? (
-                <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+                <button className="btn-primary" onClick={openCreate}>
                   <Plus size={14} /> New sprint
                 </button>
               ) : undefined
@@ -115,7 +129,7 @@ export default function SprintsPage() {
         </div>
       )}
 
-      <CreateSprintModal open={createOpen} onClose={() => setCreateOpen(false)} />
+      <CreateSprintModal open={createOpen} onClose={closeCreate} />
     </div>
   )
 }
@@ -123,12 +137,29 @@ export default function SprintsPage() {
 function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolean }) {
   const queryClient = useQueryClient()
   const user = useAuthStore((s) => s.user)
-  const [tab, setTab] = useState<'board' | 'backlog' | 'burndown' | 'standups'>('board')
   const [addTaskOpen, setAddTaskOpen] = useState(false)
   const [completeOpen, setCompleteOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [params, setParams] = useSearchParams()
+  const rawTab = parseSprintTab(params.get('tab'))
+  const tab: SprintTab =
+    rawTab === 'retrospective' && sprint.status !== 'completed' ? 'board' : rawTab
+
+  useEffect(() => {
+    if (rawTab === 'retrospective' && sprint.status !== 'completed') {
+      const next = new URLSearchParams(params)
+      next.delete('tab')
+      setParams(next, { replace: true })
+    }
+  }, [rawTab, sprint.status, params, setParams])
+
+  const setTab = (nextTab: SprintTab) => {
+    const next = new URLSearchParams(params)
+    if (nextTab === 'board') next.delete('tab')
+    else next.set('tab', nextTab)
+    setParams(next, { replace: true })
+  }
 
   const tasks = useQuery({
     queryKey: ['sprint-tasks', sprint.id],
@@ -139,10 +170,23 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
   const canRun = canManage || isScrumMaster
   const incompleteCount = (tasks.data ?? []).filter((t) => !t.completed_at).length
 
+  const goToRetrospective = () => {
+    const next = new URLSearchParams(params)
+    next.set('tab', 'retrospective')
+    setParams(next, { replace: true })
+  }
+
   const act = useMutation({
-    mutationFn: (action: 'start' | 'complete') => api.post<Sprint>(`/sprints/${sprint.id}/${action}`),
+    mutationFn: (action: 'start' | 'complete') =>
+      api.post(action === 'complete' ? `/sprints/${sprint.id}/complete` : `/sprints/${sprint.id}/start`),
     onSuccess: (_, action) => {
-      toast.success(`Sprint ${action === 'start' ? 'started' : 'completed'}`)
+      if (action === 'complete') {
+        toast.success('Sprint completed — retrospective is ready')
+        void queryClient.invalidateQueries({ queryKey: ['sprints'] })
+        goToRetrospective()
+        return
+      }
+      toast.success('Sprint started')
       void queryClient.invalidateQueries({ queryKey: ['sprints'] })
     },
     onError: (err) => toast.error(errorMessage(err)),
@@ -161,7 +205,13 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
   })
 
   const projectId = tasks.data?.[0]?.project_id ?? sprint.project_id ?? undefined
+  const projects = useProjects(sprint.workspace_id)
+  const project = projects.data?.find((p) => p.id === projectId)
   const statuses = useStatuses(projectId ?? undefined)
+  const canEditAllTasks = canManage || project?.my_role === 'admin'
+  const canMoveTask = (task: Task) =>
+    sprint.status !== 'completed' &&
+    (canEditAllTasks || task.assignees.some((assignee) => assignee.id === user?.id))
 
   return (
     <div className="flex min-w-0 flex-1 flex-col">
@@ -252,7 +302,15 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
         </div>
 
         <div className="mt-3 flex gap-1">
-          {(['board', 'backlog', 'burndown', 'standups'] as const).map((t) => (
+          {(
+            [
+              'board',
+              'backlog',
+              'burndown',
+              'standups',
+              ...(sprint.status === 'completed' ? (['retrospective'] as const) : []),
+            ] as SprintTab[]
+          ).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -274,9 +332,12 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
           ) : projectId && (tasks.data ?? []).length > 0 ? (
             <KanbanBoard
               projectId={projectId}
+              sprintId={sprint.id}
               tasks={tasks.data ?? []}
               statuses={statuses.data ?? []}
               canEdit={sprint.status !== 'completed'}
+              canEditTask={canMoveTask}
+              taskListQueryKey={['sprint-tasks', sprint.id]}
             />
           ) : (
             <EmptyState icon={Zap} title="No tasks in this sprint" description="Add tasks from the backlog tab." />
@@ -284,6 +345,9 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
         {tab === 'backlog' && <SprintBacklog sprint={sprint} sprintTasks={tasks.data ?? []} />}
         {tab === 'burndown' && <Burndown sprintId={sprint.id} />}
         {tab === 'standups' && <Standups sprintId={sprint.id} />}
+        {tab === 'retrospective' && sprint.status === 'completed' && (
+          <Retrospective sprint={sprint} canManage={canManage} />
+        )}
       </div>
 
       <AddSprintTaskModal sprint={sprint} open={addTaskOpen} onClose={() => setAddTaskOpen(false)} />
@@ -292,6 +356,7 @@ function SprintDetail({ sprint, canManage }: { sprint: Sprint; canManage: boolea
         incompleteCount={incompleteCount}
         open={completeOpen}
         onClose={() => setCompleteOpen(false)}
+        onCompleted={goToRetrospective}
       />
       <EditSprintModal sprint={sprint} open={editOpen} onClose={() => setEditOpen(false)} />
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete sprint" width="max-w-sm">
@@ -346,6 +411,12 @@ function EditSprintModal({ sprint, open, onClose }: { sprint: Sprint; open: bool
   })
 
   const datesInvalid = !!startDate && !!endDate && endDate <= startDate
+  const today = todayDateKey()
+  const startMin = minSelectableDateKey(sprint.start_date)
+  const endMin = minEndDateKey(startDate || today, sprint.end_date)
+  const pastDate =
+    (!!startDate && startDate < today && startDate !== (sprint.start_date ?? '')) ||
+    (!!endDate && endDate < today && endDate !== (sprint.end_date ?? ''))
 
   return (
     <Modal open={open} onClose={onClose} title="Edit sprint" width="max-w-md">
@@ -355,14 +426,15 @@ function EditSprintModal({ sprint, open, onClose }: { sprint: Sprint; open: bool
         <div className="flex gap-2">
           <div className="flex-1">
             <label className="mb-1 block text-xs text-fg-muted">Start</label>
-            <input type="date" className="input-dark" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+            <DateInput value={startDate} onChange={setStartDate} min={startMin} />
           </div>
           <div className="flex-1">
             <label className="mb-1 block text-xs text-fg-muted">End</label>
-            <input type="date" className="input-dark" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+            <DateInput value={endDate} onChange={setEndDate} min={endMin} />
           </div>
         </div>
         {datesInvalid && <p className="text-xs text-red-400">End date must be after the start date.</p>}
+        {pastDate && <p className="text-xs text-red-400">Sprint dates cannot be in the past.</p>}
         <div>
           <label className="mb-1 block text-xs text-fg-muted">Scrum master</label>
           <select className="input-dark" value={scrumMasterId} onChange={(e) => setScrumMasterId(e.target.value)}>
@@ -374,7 +446,7 @@ function EditSprintModal({ sprint, open, onClose }: { sprint: Sprint; open: bool
             ))}
           </select>
         </div>
-        <button className="btn-primary w-full" disabled={save.isPending || !name.trim() || datesInvalid} onClick={() => save.mutate()}>
+        <button className="btn-primary w-full" disabled={save.isPending || !name.trim() || datesInvalid || pastDate} onClick={() => save.mutate()}>
           Save changes
         </button>
       </div>
@@ -389,22 +461,32 @@ function AddSprintTaskModal({ sprint, open, onClose }: { sprint: Sprint; open: b
   const [title, setTitle] = useState('')
   const [projectId, setProjectId] = useState('')
   const [creating, setCreating] = useState(false)
+  const [createGithubIssue, setCreateGithubIssue] = useCreateGithubIssuePreference()
 
   const effectiveProject = sprint.project_id ?? (projectId || projects.data?.[0]?.id)
   const sprintProject = projects.data?.find((p) => p.id === sprint.project_id)
+
+  const handleClose = () => {
+    setTitle('')
+    setProjectId('')
+    onClose()
+  }
 
   const create = async () => {
     if (!title.trim() || !effectiveProject) return
     setCreating(true)
     try {
-      const task = await api.post<Task>(`/projects/${effectiveProject}/tasks`, { title: title.trim() })
+      const task = await api.post<Task>(`/projects/${effectiveProject}/tasks`, {
+        title: title.trim(),
+        create_github_issue: createGithubIssue,
+      })
       await api.post(`/sprints/${sprint.id}/tasks`, { task_ids: [task.id] })
-      toast.success(`${task.ref} created in sprint`)
-      setTitle('')
+      toast.success(`${task.ref} created and added to sprint`)
       void queryClient.invalidateQueries({ queryKey: ['sprint-tasks', sprint.id] })
       void queryClient.invalidateQueries({ queryKey: ['sprints'] })
       void queryClient.invalidateQueries({ queryKey: ['tasks'] })
       void queryClient.invalidateQueries({ queryKey: ['backlog'] })
+      handleClose()
     } catch (err) {
       toast.error(errorMessage(err))
     } finally {
@@ -413,7 +495,7 @@ function AddSprintTaskModal({ sprint, open, onClose }: { sprint: Sprint; open: b
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={`Add task to ${sprint.name}`} width="max-w-md">
+    <Modal open={open} onClose={handleClose} title={`Add task to ${sprint.name}`} width="max-w-md">
       <div className="space-y-3">
         <input
           autoFocus
@@ -436,6 +518,13 @@ function AddSprintTaskModal({ sprint, open, onClose }: { sprint: Sprint; open: b
             ))}
           </select>
         )}
+        {effectiveProject && (
+          <CreateGithubIssueToggle
+            projectId={effectiveProject}
+            checked={createGithubIssue}
+            onChange={setCreateGithubIssue}
+          />
+        )}
         <button className="btn-primary w-full" disabled={creating || !title.trim() || !effectiveProject} onClick={() => void create()}>
           <Plus size={14} /> Create in sprint
         </button>
@@ -450,11 +539,13 @@ function CompleteSprintModal({
   incompleteCount,
   open,
   onClose,
+  onCompleted,
 }: {
   sprint: Sprint
   incompleteCount: number
   open: boolean
   onClose: () => void
+  onCompleted: () => void
 }) {
   const queryClient = useQueryClient()
   const sprints = useSprints(sprint.workspace_id)
@@ -469,12 +560,13 @@ function CompleteSprintModal({
 
   const complete = useMutation({
     mutationFn: () =>
-      api.post<Sprint>(`/sprints/${sprint.id}/complete`, moveTo ? { move_incomplete_to: moveTo } : {}),
+      api.post(`/sprints/${sprint.id}/complete`, moveTo ? { move_incomplete_to: moveTo } : {}),
     onSuccess: () => {
-      toast.success('Sprint completed')
+      toast.success('Sprint completed — retrospective is ready')
       void queryClient.invalidateQueries({ queryKey: ['sprints'] })
       void queryClient.invalidateQueries({ queryKey: ['sprint-tasks'] })
       onClose()
+      onCompleted()
     },
     onError: (err) => toast.error(errorMessage(err)),
   })
@@ -534,6 +626,7 @@ function SprintBacklog({ sprint, sprintTasks }: { sprint: Sprint; sprintTasks: T
     try {
       if (add) await api.post(`/sprints/${sprint.id}/tasks`, { task_ids: [taskId] })
       else await api.delete(`/sprints/${sprint.id}/tasks/${taskId}`)
+      toast.success(add ? 'Task added to sprint' : 'Task removed from sprint')
       void queryClient.invalidateQueries({ queryKey: ['sprint-tasks', sprint.id] })
       void queryClient.invalidateQueries({ queryKey: ['sprints'] })
     } catch (err) {
@@ -651,9 +744,9 @@ function Burndown({ sprintId }: { sprintId: string }) {
         </div>
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
           <path d={idealPath} stroke="#6F737B" strokeWidth="1.5" strokeDasharray="4 4" fill="none" />
-          <path d={actualPath} stroke="#8C5BFF" strokeWidth="2.5" fill="none" />
+          <path d={actualPath} stroke="#2B88EE" strokeWidth="2.5" fill="none" />
           {data.points.map((p, i) => (
-            <circle key={p.day} cx={i * stepX} cy={y(p.remaining_points)} r="3" fill="#8C5BFF" />
+            <circle key={p.day} cx={i * stepX} cy={y(p.remaining_points)} r="3" fill="#2B88EE" />
           ))}
         </svg>
         <div className="mt-1 flex justify-between text-[10px] text-fg-muted">
@@ -687,6 +780,9 @@ function Standups({ sprintId }: { sprintId: string }) {
       }),
     onSuccess: () => {
       toast.success('Standup submitted')
+      setYesterday('')
+      setTodayText('')
+      setBlockers('')
       void queryClient.invalidateQueries({ queryKey: ['standups', sprintId] })
     },
     onError: (err) => toast.error(errorMessage(err)),
@@ -741,6 +837,283 @@ function Standups({ sprintId }: { sprintId: string }) {
   )
 }
 
+const RETRO_COLUMNS: {
+  category: RetrospectiveItemCategory
+  title: string
+  subtitle: string
+  placeholder: string
+}[] = [
+  {
+    category: 'rose',
+    title: 'Went well',
+    subtitle: 'Roses — wins and habits to keep',
+    placeholder: 'What worked well this sprint?',
+  },
+  {
+    category: 'thorn',
+    title: 'Needs improvement',
+    subtitle: 'Thorns — what got in the way',
+    placeholder: 'What hindered progress?',
+  },
+  {
+    category: 'bud',
+    title: 'Action items',
+    subtitle: 'Buds — 1–2 concrete follow-ups',
+    placeholder: 'What should we try next sprint?',
+  },
+]
+
+function Retrospective({ sprint, canManage }: { sprint: Sprint; canManage: boolean }) {
+  const queryClient = useQueryClient()
+  const user = useAuthStore((s) => s.user)
+  const members = useWorkspaceMembers(sprint.workspace_id)
+  const [stageNotes, setStageNotes] = useState('')
+  const [drafts, setDrafts] = useState<Record<RetrospectiveItemCategory, string>>({
+    rose: '',
+    thorn: '',
+    bud: '',
+  })
+  const [budAssignee, setBudAssignee] = useState('')
+
+  const retro = useQuery({
+    queryKey: ['sprint-retrospective', sprint.id],
+    queryFn: () => api.get<SprintRetrospective>(`/sprints/${sprint.id}/retrospective`),
+  })
+
+  useEffect(() => {
+    if (retro.data) setStageNotes(retro.data.stage_notes ?? '')
+  }, [retro.data])
+
+  const saveNotes = useMutation({
+    mutationFn: () =>
+      api.patch<SprintRetrospective>(`/sprints/${sprint.id}/retrospective`, {
+        stage_notes: stageNotes.trim() || null,
+      }),
+    onSuccess: () => {
+      toast.success('Stage notes saved')
+      void queryClient.invalidateQueries({ queryKey: ['sprint-retrospective', sprint.id] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const addItem = useMutation({
+    mutationFn: (payload: {
+      category: RetrospectiveItemCategory
+      body: string
+      assignee_id?: string | null
+    }) => api.post<RetrospectiveItem>(`/sprints/${sprint.id}/retrospective/items`, payload),
+    onSuccess: (_, vars) => {
+      setDrafts((d) => ({ ...d, [vars.category]: '' }))
+      if (vars.category === 'bud') setBudAssignee('')
+      void queryClient.invalidateQueries({ queryKey: ['sprint-retrospective', sprint.id] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const patchItem = useMutation({
+    mutationFn: ({
+      itemId,
+      body,
+    }: {
+      itemId: string
+      body: { body?: string; is_done?: boolean; assignee_id?: string | null }
+    }) => api.patch<RetrospectiveItem>(`/sprints/${sprint.id}/retrospective/items/${itemId}`, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['sprint-retrospective', sprint.id] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const deleteItem = useMutation({
+    mutationFn: (itemId: string) => api.delete(`/sprints/${sprint.id}/retrospective/items/${itemId}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['sprint-retrospective', sprint.id] })
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const canEditItem = (item: RetrospectiveItem) =>
+    canManage || item.author_id === user?.id || sprint.scrum_master_id === user?.id
+
+  if (retro.isLoading) return <CenteredSpinner />
+  if (retro.isError || !retro.data) {
+    return (
+      <p className="px-6 py-8 text-center text-sm text-fg-muted">
+        Could not load the retrospective.
+      </p>
+    )
+  }
+
+  const summary = retro.data.summary
+  const itemsByCategory = (category: RetrospectiveItemCategory) =>
+    retro.data.items.filter((i) => i.category === category)
+
+  return (
+    <div className="space-y-6 px-6 pb-10">
+      <section className="rounded-xl border border-ink-700 bg-ink-850 p-4">
+        <h3 className="text-sm font-semibold text-fg">Sprint retrospective</h3>
+        <p className="mt-1 text-sm text-fg-secondary">
+          Reflect on what went well, what hindered progress, and commit to a few action items for the
+          next sprint. Add notes as a team — no meeting required.
+        </p>
+        {summary && (
+          <div className="mt-3 grid gap-2 sm:grid-cols-4">
+            <div className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase text-fg-muted">Tasks done</p>
+              <p className="text-sm font-semibold text-fg">
+                {summary.completed_tasks}/{summary.total_tasks}
+              </p>
+            </div>
+            <div className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase text-fg-muted">Story points</p>
+              <p className="text-sm font-semibold text-fg">
+                {summary.completed_points}/{summary.total_points}
+              </p>
+            </div>
+            <div className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase text-fg-muted">Scope changes</p>
+              <p className="text-sm font-semibold text-fg">{summary.scope_changes}</p>
+            </div>
+            <div className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase text-fg-muted">Pace</p>
+              <p className="text-sm font-semibold capitalize text-fg">{summary.pace.replace('_', ' ')}</p>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-xl border border-ink-700 bg-ink-850 p-4">
+        <h3 className="mb-1 text-sm font-semibold text-fg">Set the stage</h3>
+        <p className="mb-2 text-xs text-fg-muted">
+          Optional facilitator note — keep discussion blameless and focused on improvement.
+        </p>
+        <textarea
+          rows={2}
+          className="input-dark resize-none"
+          placeholder="e.g. We're here to improve how we work together…"
+          value={stageNotes}
+          onChange={(e) => setStageNotes(e.target.value)}
+        />
+        <div className="mt-2 flex justify-end">
+          <button
+            className="btn-secondary !py-1.5 text-xs"
+            disabled={saveNotes.isPending || stageNotes === (retro.data.stage_notes ?? '')}
+            onClick={() => saveNotes.mutate()}
+          >
+            Save notes
+          </button>
+        </div>
+      </section>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        {RETRO_COLUMNS.map((col) => (
+          <section key={col.category} className="flex flex-col rounded-xl border border-ink-700 bg-ink-850 p-3">
+            <h3 className="text-sm font-semibold text-fg">{col.title}</h3>
+            <p className="mb-3 text-[11px] text-fg-muted">{col.subtitle}</p>
+
+            <div className="mb-3 space-y-2">
+              {itemsByCategory(col.category).map((item) => (
+                <div key={item.id} className="rounded-lg border border-ink-700 bg-ink-900 p-2.5">
+                  <div className="flex items-start gap-2">
+                    {col.category === 'bud' && (
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 accent-brand"
+                        checked={item.is_done}
+                        disabled={!canEditItem(item) || patchItem.isPending}
+                        onChange={(e) =>
+                          patchItem.mutate({ itemId: item.id, body: { is_done: e.target.checked } })
+                        }
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className={cn(
+                          'text-sm text-fg',
+                          item.is_done && col.category === 'bud' && 'text-fg-muted line-through',
+                        )}
+                      >
+                        {item.body}
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
+                        <span className="flex items-center gap-1">
+                          <Avatar name={item.author?.full_name || '?'} src={item.author?.avatar_url} size={16} />
+                          {item.author?.full_name || 'Someone'}
+                        </span>
+                        {item.assignee && (
+                          <span className="flex items-center gap-1">
+                            · Owner{' '}
+                            <Avatar
+                              name={item.assignee.full_name}
+                              src={item.assignee.avatar_url}
+                              size={16}
+                            />
+                            {item.assignee.full_name}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {canEditItem(item) && (
+                      <button
+                        className="btn-ghost !p-1 text-fg-muted hover:text-red-400"
+                        title="Delete"
+                        disabled={deleteItem.isPending}
+                        onClick={() => deleteItem.mutate(item.id)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {itemsByCategory(col.category).length === 0 && (
+                <p className="py-2 text-center text-xs text-fg-muted">No items yet</p>
+              )}
+            </div>
+
+            <div className="mt-auto space-y-2 border-t border-ink-700 pt-3">
+              <textarea
+                rows={2}
+                className="input-dark resize-none text-sm"
+                placeholder={col.placeholder}
+                value={drafts[col.category]}
+                onChange={(e) => setDrafts((d) => ({ ...d, [col.category]: e.target.value }))}
+              />
+              {col.category === 'bud' && (
+                <select
+                  className="input-dark text-xs"
+                  value={budAssignee}
+                  onChange={(e) => setBudAssignee(e.target.value)}
+                >
+                  <option value="">Owner (optional)</option>
+                  {(members.data ?? []).map((m) => (
+                    <option key={m.user_id} value={m.user_id}>
+                      {m.user?.full_name || m.user?.email || m.user_id}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                className="btn-primary w-full !py-1.5 text-xs"
+                disabled={addItem.isPending || !drafts[col.category].trim()}
+                onClick={() =>
+                  addItem.mutate({
+                    category: col.category,
+                    body: drafts[col.category].trim(),
+                    assignee_id: col.category === 'bud' && budAssignee ? budAssignee : undefined,
+                  })
+                }
+              >
+                <Plus size={12} /> Add
+              </button>
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { workspace } = useCurrentContext()
   const projects = useProjects(workspace?.id)
@@ -753,6 +1126,22 @@ function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => vo
   const [endDate, setEndDate] = useState('')
   const [scrumMasterId, setScrumMasterId] = useState('')
   const [creating, setCreating] = useState(false)
+
+  const resetForm = useCallback(() => {
+    setName('')
+    setGoal('')
+    setProjectId('')
+    setStartDate('')
+    setEndDate('')
+    setScrumMasterId('')
+  }, [])
+
+  useResetFormWhenOpen(open, resetForm)
+
+  const today = todayDateKey()
+  const datesInvalid = !!startDate && !!endDate && endDate <= startDate
+  const pastDate = (!!startDate && startDate < today) || (!!endDate && endDate < today)
+  const endMin = minEndDateKey(startDate || today)
 
   const create = async () => {
     if (!workspace || !name.trim()) return
@@ -768,8 +1157,6 @@ function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => vo
       })
       void queryClient.invalidateQueries({ queryKey: ['sprints', workspace.id] })
       toast.success('Sprint created')
-      setName('')
-      setGoal('')
       onClose()
     } catch (err) {
       toast.error(errorMessage(err))
@@ -794,13 +1181,15 @@ function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => vo
         <div className="flex gap-2">
           <div className="flex-1">
             <label className="mb-1 block text-xs text-fg-muted">Start</label>
-            <input type="date" className="input-dark" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+            <DateInput value={startDate} onChange={setStartDate} min={today} />
           </div>
           <div className="flex-1">
             <label className="mb-1 block text-xs text-fg-muted">End</label>
-            <input type="date" className="input-dark" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+            <DateInput value={endDate} onChange={setEndDate} min={endMin} />
           </div>
         </div>
+        {datesInvalid && <p className="text-xs text-red-400">End date must be after the start date.</p>}
+        {pastDate && <p className="text-xs text-red-400">Sprint dates cannot be in the past.</p>}
         <div>
           <label className="mb-1 block text-xs text-fg-muted">Scrum master (optional)</label>
           <select className="input-dark" value={scrumMasterId} onChange={(e) => setScrumMasterId(e.target.value)}>
@@ -815,7 +1204,7 @@ function CreateSprintModal({ open, onClose }: { open: boolean; onClose: () => vo
             Any workspace member — they can edit, start and complete this sprint without needing admin rights.
           </p>
         </div>
-        <button className="btn-primary w-full" disabled={creating || !name.trim()} onClick={create}>
+        <button className="btn-primary w-full" disabled={creating || !name.trim() || datesInvalid || pastDate} onClick={create}>
           {creating ? 'Creating…' : 'Create sprint'}
         </button>
       </div>

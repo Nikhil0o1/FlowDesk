@@ -20,6 +20,8 @@ from app.models.task import TASK_PRIORITIES, TASK_TYPES, CustomStatus, Task, Tas
 from app.models.time_entry import TimeEntry
 from app.models.user import Profile, User
 from app.models.workspace import WorkspaceMember
+from app.core.sheet_safety import sanitize_sheet_rows
+from app.core.task_ref import format_task_ref
 from app.services import google_service, task_service
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ def build_project_rows(db: Session, project: Project) -> list[list]:
     rows: list[list] = [HEADER]
     for t in tasks:
         rows.append([
-            f"{project.key}-{t.number}",
+            format_task_ref(project.id, t.number),
             t.title,
             statuses.get(t.status_id, ""),
             t.task_type,
@@ -62,7 +64,7 @@ def build_project_rows(db: Session, project: Project) -> list[list]:
             "yes" if t.completed_at else "",
             t.created_at.date().isoformat() if t.created_at else "",
         ])
-    return rows
+    return sanitize_sheet_rows(rows)
 
 
 # ---------------- Two-way: apply sheet edits back to tasks ----------------
@@ -183,7 +185,7 @@ def apply_sheet_edits(db: Session, sync: GoogleSheetSync, project: Project,
     ).all()
     status_by_name = {s.name.lower(): s for s in statuses}
     tasks_by_ref = {
-        f"{project.key}-{t.number}": t
+        format_task_ref(project.id, t.number): t
         for t in db.scalars(
             select(Task).where(Task.project_id == project.id, Task.deleted_at.is_(None),
                                Task.is_archived.is_(False), Task.parent_task_id.is_(None))
@@ -285,7 +287,7 @@ def build_time_report(db: Session, project: Project,
     total = 0.0
     for entry, task in pairs:
         hours = round((entry.duration_seconds or 0) / 3600, 2)
-        ref = f"{project.key}-{task.number}"
+        ref = format_task_ref(project.id, task.number)
         user = names.get(entry.user_id) or ""
         entries.append([
             entry.started_at.date().isoformat(),
@@ -313,4 +315,4 @@ def build_time_report(db: Session, project: Project,
     summary.append(["By task", "Title", "Hours"])
     for ref, (title, hours) in sorted(by_task.items(), key=lambda kv: -kv[1][1]):
         summary.append([ref, title, round(hours, 2)])
-    return entries, summary
+    return sanitize_sheet_rows(entries), sanitize_sheet_rows(summary)

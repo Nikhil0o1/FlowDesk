@@ -7,16 +7,17 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_superadmin
+from app.core.email_validation import InviteEmail
 from app.db.session import get_db
 from app.models.audit import AuditLog, CronJobLog
 from app.models.organization import Organization, OrganizationMember
-from app.models.project import Project
-from app.models.task import Task
+from app.models.project import Project, Space, TaskList
+from app.models.task import CustomStatus, Task
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.schemas.common import Message, Page
@@ -31,10 +32,7 @@ router = APIRouter(prefix="/admin", tags=["platform-admin"])
 class OrgMetadataOut(BaseModel):
     id: uuid.UUID
     name: str
-    slug: str
     is_disabled: bool
-    plan: str
-    seats: int
     created_at: datetime
     member_count: int
     workspace_count: int
@@ -44,10 +42,7 @@ class OrgMetadataOut(BaseModel):
 
 class OrgCreateRequest(BaseModel):
     name: str = Field(min_length=2, max_length=200)
-    slug: str = Field(min_length=2, max_length=120, pattern="^[a-z0-9][a-z0-9-]*$")
-    owner_email: EmailStr
-    plan: str = Field(default="free", max_length=40)
-    seats: int = Field(default=10, ge=1, le=10000)
+    owner_email: InviteEmail
 
 
 class PlatformStatsOut(BaseModel):
@@ -91,10 +86,9 @@ def _org_metadata(db: Session, org: Organization) -> OrgMetadataOut:
         )
     ) or 0
     return OrgMetadataOut(
-        id=org.id, name=org.name, slug=org.slug, is_disabled=org.is_disabled,
-        plan=org.plan, seats=org.seats, created_at=org.created_at,
-        member_count=member_count, workspace_count=workspace_count,
-        project_count=project_count, task_count=task_count,
+        id=org.id, name=org.name, is_disabled=org.is_disabled,
+        created_at=org.created_at, member_count=member_count,
+        workspace_count=workspace_count, project_count=project_count, task_count=task_count,
     )
 
 
@@ -140,21 +134,56 @@ def list_all_organizations(
     )
 
 
+def _bootstrap_org_defaults(db: Session, org: Organization) -> None:
+    """Seed a default workspace → space → project for every new org."""
+    ws = Workspace(
+        organization_id=org.id,
+        name="My Workspace",
+        description="Your team's workspace. Rename it to match your team.",
+        color="#8C5BFF",
+    )
+    db.add(ws)
+    db.flush()
+
+    space = Space(workspace_id=ws.id, name="General", color="#4F8BFF", position=0)
+    db.add(space)
+    db.flush()
+
+    project = Project(
+        space_id=space.id,
+        workspace_id=ws.id,
+        name="Getting Started",
+        description="Your first project. Rename it or create a new one to plan your work.",
+        color="#9B59B6",
+        position=0,
+    )
+    db.add(project)
+    db.flush()
+
+    db.add(TaskList(project_id=project.id, name="Tasks", position=0))
+    db.add(TaskList(project_id=project.id, name="Backlog", position=1))
+    for name, color, category, pos in [
+        ("To Do", "#87909E", "todo", 0),
+        ("In Progress", "#5B9FF0", "in_progress", 1),
+        ("In Review", "#B07BE0", "in_progress", 2),
+        ("Complete", "#4CB782", "done", 3),
+    ]:
+        db.add(CustomStatus(project_id=project.id, name=name, color=color, category=category, position=pos))
+
+
 @router.post("/organizations", response_model=OrgMetadataOut, status_code=201)
 def create_organization(
     body: OrgCreateRequest,
     db: Session = Depends(get_db),
     admin: User = Depends(get_superadmin),
 ):
-    if db.scalar(select(Organization).where(Organization.slug == body.slug)):
-        raise HTTPException(status_code=409, detail="Slug is already in use")
-    org = Organization(name=body.name, slug=body.slug, plan=body.plan, seats=body.seats)
+    org = Organization(name=body.name)
     db.add(org)
     db.flush()
+    _bootstrap_org_defaults(db, org)
     audit(db, "organization.created", actor_id=admin.id, target_type="organization",
           target_id=org.id, data={"name": org.name, "owner_email": body.owner_email})
-    db.commit()
-    # Owner onboarding invite (new or existing user)
+    # invite_service commits the whole unit — org + audit + defaults + invite atomically
     invite_service.create_invite(
         db, inviter=admin, email=body.owner_email, scope="organization",
         role="owner", organization_id=org.id,

@@ -1,0 +1,18 @@
+# Render Blueprint — FlowDesk MCP HTTP server (Node).
+# Deploy alongside flowdesk-api; set FLOWDESK_API_URL to the API service URL.
+services:
+  - type: web
+    name: flowdesk-mcp
+    runtime: docker
+    dockerfilePath: ./mcp/Dockerfile
+    dockerContext: ./mcp
+    healthCheckPath: /health
+    envVars:
+      - key: FLOWDESK_API_URL
+        value: https://flowdesk-api-mvwt.onrender.com
+      - key: MCP_PUBLIC_URL
+        value: https://flowdesk-mcp.onrender.com
+      - key: MCP_PORT
+        value: "3100"
+      - key: MCP_BIND_HOST
+        value: "0.0.0.0"

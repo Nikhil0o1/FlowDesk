@@ -1,0 +1,6 @@
+# Development / CI tooling (not installed in production images by default)
+-r requirements.txt
+pip-audit==2.9.0
+pytest==8.3.5
+pytest-cov==6.2.1
+pytest-asyncio==1.0.0

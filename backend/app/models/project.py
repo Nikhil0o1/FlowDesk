@@ -27,19 +27,15 @@ class Space(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
 
 class Project(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "projects"
-    __table_args__ = (
-        UniqueConstraint("workspace_id", "key", name="uq_project_key_per_workspace"),
-    )
 
-    space_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("spaces.id", ondelete="CASCADE"), index=True, nullable=False
+    space_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("spaces.id", ondelete="CASCADE"), index=True, nullable=True
     )
     # Denormalized for fast permission checks and workspace-wide queries
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=False
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
-    key: Mapped[str] = mapped_column(String(10), nullable=False)  # e.g. "FLOW" -> FLOW-123
     description: Mapped[str | None] = mapped_column(Text)
     color: Mapped[str] = mapped_column(String(20), default="#9B59B6", nullable=False)
     icon: Mapped[str | None] = mapped_column(String(40))
@@ -50,6 +46,25 @@ class Project(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+    is_personal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    personal_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+
+
+class SpaceMember(Base, UUIDPkMixin, TimestampMixin):
+    __tablename__ = "space_members"
+    __table_args__ = (
+        UniqueConstraint("space_id", "user_id", name="uq_space_member"),
+    )
+
+    space_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("spaces.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # admin | member
 
 
 class ProjectMember(Base, UUIDPkMixin, TimestampMixin):
@@ -65,6 +80,24 @@ class ProjectMember(Base, UUIDPkMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
     role: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # admin | member | viewer
+
+
+class ProjectTeam(Base, UUIDPkMixin, TimestampMixin):
+    """Links a workspace team to a project. Assigning adds all team members as project members."""
+
+    __tablename__ = "project_teams"
+    __table_args__ = (UniqueConstraint("project_id", "team_id", name="uq_project_team"),)
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    default_role: Mapped[str] = mapped_column(String(20), default="member", nullable=False)
+    assigned_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
 
 
 class TaskList(Base, UUIDPkMixin, TimestampMixin, SoftDeleteMixin):

@@ -28,6 +28,11 @@ htmlcov/
 # ---- App data (local dev only) ----
 uploads/
 
+# ---- Celery Beat (local runtime files) ----
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat.pid
+
 # ---- IDE / OS ----
 .vscode/
 .idea/

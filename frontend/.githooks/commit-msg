@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Rejects empty commit messages and obvious secret patterns.
+set -euo pipefail
+
+msg_file="$1"
+msg="$(cat "$msg_file")"
+
+if [[ -z "${msg//[[:space:]]/}" ]]; then
+  echo "ERROR: Commit message cannot be empty."
+  exit 1
+fi
+
+if echo "$msg" | grep -qiE '(api[_-]?key\s*=|secret[_-]?key\s*=|password\s*=\s*[^<]|BEGIN (RSA |OPENSSH )?PRIVATE KEY)'; then
+  echo "ERROR: Commit message looks like it contains a secret. Use GitHub Secrets for CI."
+  exit 1
+fi
+
+exit 0

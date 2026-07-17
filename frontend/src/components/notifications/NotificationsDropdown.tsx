@@ -5,17 +5,33 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import type { AppNotification, Page } from '../../lib/types'
 import { timeAgo } from '../../lib/utils'
+import { useWorkspaceStore } from '../../stores/workspace'
 import { CenteredSpinner } from '../ui/Spinner'
 
 export function notificationTarget(n: AppNotification): string {
   const data = n.data as Record<string, string | null>
+  if (data.document_id) return `/app/docs/${data.document_id}`
+  if (data.url) return data.url.replace(/^https?:\/\/[^/]+/, '') || data.url
   if (data.task_id) return `/app/tasks/${data.task_id}`
   if (data.chat_message_id || n.type === 'chat_mention') return '/app/chat'
   if (data.sprint_id) return `/app/sprints?sprint=${data.sprint_id}`
   if (n.type.startsWith('github')) return data.project_id ? `/app/projects/${data.project_id}` : '/app/dashboard'
+  if (data.invite_id) return `/activate-invite?invite=${data.invite_id}&existing=1`
+  // Legacy notifications created before invites moved to id-based acceptance.
   if (data.invite_token) return `/activate-invite?token=${data.invite_token}&existing=1`
   if (n.project_id) return `/app/projects/${n.project_id}`
   return '/app/notifications'
+}
+
+export function navigateToNotification(
+  n: AppNotification,
+  navigate: (path: string) => void,
+  pathOverride?: string,
+) {
+  if (n.workspace_id) {
+    useWorkspaceStore.getState().setWorkspace(n.workspace_id)
+  }
+  navigate(pathOverride ?? notificationTarget(n))
 }
 
 export function NotificationsDropdown({ onClose }: { onClose: () => void }) {
@@ -23,11 +39,24 @@ export function NotificationsDropdown({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate()
   const { data, isLoading } = useQuery({
     queryKey: ['notifications', 'dropdown'],
-    queryFn: () => api.get<Page<AppNotification>>('/notifications?page_size=8'),
+    queryFn: () => api.get<Page<AppNotification>>('/notifications?page_size=8&unread_only=true'),
   })
 
   const markAllRead = async () => {
     await api.post('/notifications/read-all')
+    const readAt = new Date().toISOString()
+    queryClient.setQueriesData<Page<AppNotification>>({ queryKey: ['notifications', 'page'] }, (old) =>
+      old
+        ? {
+            ...old,
+            items: old.items.map((notification) => ({ ...notification, read_at: notification.read_at ?? readAt })),
+          }
+        : old,
+    )
+    queryClient.setQueryData<Page<AppNotification>>(['notifications', 'dropdown'], (old) =>
+      old ? { ...old, items: [], total: 0, page: 1 } : old,
+    )
+    queryClient.setQueryData(['notifications-unread'], { count: 0 })
     void queryClient.invalidateQueries({ queryKey: ['notifications'] })
     void queryClient.invalidateQueries({ queryKey: ['notifications-unread'] })
   }
@@ -36,11 +65,31 @@ export function NotificationsDropdown({ onClose }: { onClose: () => void }) {
     onClose()
     if (!n.read_at) {
       void api.post(`/notifications/${n.id}/read`).then(() => {
+        const readAt = new Date().toISOString()
+        queryClient.setQueriesData<Page<AppNotification>>({ queryKey: ['notifications', 'page'] }, (old) =>
+          old
+            ? {
+                ...old,
+                items: old.items.map((notification) =>
+                  notification.id === n.id ? { ...notification, read_at: readAt } : notification,
+                ),
+              }
+            : old,
+        )
+        queryClient.setQueryData<Page<AppNotification>>(['notifications', 'dropdown'], (old) =>
+          old
+            ? {
+                ...old,
+                items: old.items.filter((notification) => notification.id !== n.id),
+                total: Math.max(0, old.total - 1),
+              }
+            : old,
+        )
         void queryClient.invalidateQueries({ queryKey: ['notifications'] })
         void queryClient.invalidateQueries({ queryKey: ['notifications-unread'] })
       })
     }
-    navigate(notificationTarget(n))
+    navigateToNotification(n, navigate)
   }
 
   return (

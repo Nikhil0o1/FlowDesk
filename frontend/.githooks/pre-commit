@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Blocks secrets and runs unit tests when src/ changes.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+staged="$(git diff --cached --name-only || true)"
+
+if echo "$staged" | grep -qE '(^|/)\.env$|(^|/)\.env\.|\.env\.local$|credentials\.json$|\.pem$|id_rsa$'; then
+  echo "ERROR: Refusing to commit environment or credential files."
+  echo "       Unstage with: git restore --staged <file>"
+  exit 1
+fi
+
+if echo "$staged" | grep -qE '^(src/|tests/)'; then
+  echo "Running frontend tests..."
+  npm test
+fi
+
+exit 0

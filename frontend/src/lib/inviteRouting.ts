@@ -8,6 +8,9 @@ export function inviteLandingPath(invite: InviteContext): string {
   if (invite.scope === 'project' && invite.project_id) {
     return `/app/projects/${invite.project_id}`
   }
+  if (invite.scope === 'space' && invite.workspace_id) {
+    return `/app/workspaces/${invite.workspace_id}`
+  }
   if (invite.scope === 'workspace' && invite.workspace_id) {
     return `/app/workspaces/${invite.workspace_id}`
   }
@@ -33,6 +36,10 @@ export function invalidateInviteQueries(invite: InviteContext, queryClient: Quer
     void queryClient.invalidateQueries({ queryKey: ['workspace-members', invite.workspace_id] })
     void queryClient.invalidateQueries({ queryKey: ['projects', invite.workspace_id] })
     void queryClient.invalidateQueries({ queryKey: ['spaces', invite.workspace_id] })
+  }
+
+  if (invite.space_id) {
+    void queryClient.invalidateQueries({ queryKey: ['space-members', invite.space_id] })
   }
 
   if (invite.project_id) {

@@ -1,0 +1,12 @@
+{
+  "_comment": "Cloudflare Transform Rules → Modify response header (one rule per entry). Expression: (http.host eq \"flowdesk.brightcone.ai\"). Regenerate with: node scripts/sync-deploy-headers.mjs",
+  "headers": {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' https://www.clarity.ms https://scripts.clarity.ms https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss: blob:; worker-src 'self' blob:; media-src 'self' blob:; frame-src 'self' blob: https://accounts.google.com https://login.microsoftonline.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+  }
+}

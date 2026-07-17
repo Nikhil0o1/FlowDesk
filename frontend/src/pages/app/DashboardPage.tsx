@@ -1,48 +1,77 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronRight,
-  Clock3,
   FolderKanban,
   History,
   LayoutGrid,
   List,
   PieChart,
   Plus,
-  RefreshCw,
   X,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
+import OrgAdminDashboard from '../../components/dashboard/OrgAdminDashboard'
+import OrgOwnerDashboard from '../../components/dashboard/OrgOwnerDashboard'
+import ProjectAdminDashboard from '../../components/dashboard/ProjectAdminDashboard'
+import ProjectMemberDashboard from '../../components/dashboard/ProjectMemberDashboard'
+import SpaceAdminDashboard from '../../components/dashboard/SpaceAdminDashboard'
+import WorkspaceAdminDashboard from '../../components/dashboard/WorkspaceAdminDashboard'
+import { AdminScopeSwitcher } from '../../components/dashboard/AdminScopeSwitcher'
 import { api, errorMessage } from '../../lib/api'
-import { useCurrentContext, useProjects, useSpaces } from '../../lib/queries'
-import { getRecents } from '../../lib/recents'
-import type { WorkspaceTaskStats } from '../../lib/types'
-import { cn, timeAgo } from '../../lib/utils'
+import { useCurrentContext, useProjects, useSpaces, useUserRoles } from '../../lib/queries'
+import { adminWorkspaceRoles, dashboardViewsForWorkspace } from '../../lib/scopedRoles'
+import { RecentListRow } from '../../components/recents/RecentListRow'
+import { getRecents, RECENTS_UPDATED_EVENT, type RecentItem } from '../../lib/recents'
+import type { Workspace, WorkspaceTaskStats } from '../../lib/types'
+import { cn } from '../../lib/utils'
 import { toast } from '../../stores/toast'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { CenteredSpinner } from '../../components/ui/Spinner'
+
+const NO_SCOPES: { id: string; label: string; meta?: string }[] = []
+const noopScope = () => {}
 
 export default function DashboardPage() {
   const { org, workspace, isLoading } = useCurrentContext()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { data: roles, isLoading: rolesLoading } = useUserRoles()
+  const [activeViewKey, setActiveViewKey] = useState<string | null>(null)
 
-  // Cards silently refresh every 60s — no UI chrome for it
+  // Which dashboards this user holds inside the CURRENTLY selected workspace. Switching
+  // workspace (top bar) recomputes this; the in-dashboard switcher moves between the
+  // roles/projects held within this one workspace.
+  const views = useMemo(
+    () => dashboardViewsForWorkspace(roles, workspace?.id),
+    [roles, workspace?.id],
+  )
+  const activeView = views.find((v) => v.key === activeViewKey) ?? views[0] ?? null
+  const adminWorkspaceCount = useMemo(
+    () => (roles ? adminWorkspaceRoles(roles).length : 0),
+    [roles],
+  )
+
   useEffect(() => {
     const id = window.setInterval(() => {
       void queryClient.invalidateQueries({ queryKey: ['projects'] })
       void queryClient.invalidateQueries({ queryKey: ['spaces'] })
       void queryClient.invalidateQueries({ queryKey: ['workspace-task-stats'] })
+      void queryClient.invalidateQueries({ queryKey: ['org-dashboard'] })
+      void queryClient.invalidateQueries({ queryKey: ['workspace-dashboard'] })
+      void queryClient.invalidateQueries({ queryKey: ['space-dashboard'] })
+      void queryClient.invalidateQueries({ queryKey: ['project-dashboard'] })
+      void queryClient.invalidateQueries({ queryKey: ['project-member-dashboard'] })
+      void queryClient.invalidateQueries({ queryKey: ['user-roles'] })
     }, 60_000)
     return () => window.clearInterval(id)
   }, [queryClient])
 
-  if (isLoading) return <CenteredSpinner />
+  if (isLoading || rolesLoading) return <CenteredSpinner />
 
-  // A fresh organization has no workspaces yet — onboard instead of spinning forever
   if (!workspace) {
-    const isOwner = org?.my_role === 'owner'
+    const isOwner = org?.my_role === 'owner' || org?.my_role === 'admin'
     return (
       <div className="flex h-full items-center justify-center px-8">
         <EmptyState
@@ -65,6 +94,77 @@ export default function DashboardPage() {
     )
   }
 
+  // The dashboard body for the active view. Org leaders always resolve to the org
+  // dashboard; everyone else gets the dashboard for their role in this workspace.
+  let body: React.ReactNode = null
+  if (activeView?.kind === 'org_owner' && org) {
+    body = <OrgOwnerDashboard orgId={org.id} />
+  } else if (activeView?.kind === 'org_admin' && org) {
+    body = <OrgAdminDashboard orgId={org.id} />
+  } else if (activeView?.kind === 'workspace_admin' && activeView.scopeId) {
+    body = <WorkspaceAdminDashboard workspaceId={activeView.scopeId} adminWorkspaceCount={adminWorkspaceCount} />
+  } else if (activeView?.kind === 'space_admin' && activeView.scopeId) {
+    body = (
+      <SpaceAdminDashboard
+        spaceId={activeView.scopeId}
+        scopeOptions={NO_SCOPES}
+        scopeId={activeView.scopeId}
+        onScopeChange={noopScope}
+      />
+    )
+  } else if (activeView?.kind === 'project_admin' && activeView.scopeId) {
+    body = (
+      <ProjectAdminDashboard
+        projectId={activeView.scopeId}
+        scopeOptions={NO_SCOPES}
+        scopeId={activeView.scopeId}
+        onScopeChange={noopScope}
+      />
+    )
+  } else if (
+    (activeView?.kind === 'project_member' || activeView?.kind === 'project_viewer') &&
+    activeView.scopeId
+  ) {
+    body = (
+      <ProjectMemberDashboard
+        projectId={activeView.scopeId}
+        scopeOptions={NO_SCOPES}
+        scopeId={activeView.scopeId}
+        onScopeChange={noopScope}
+      />
+    )
+  }
+
+  if (body === null) {
+    // No role-specific dashboard for this workspace → generic overview.
+    return <GenericWorkspaceOverview workspace={workspace} />
+  }
+
+  // More than one dashboard in this workspace → show a switcher to move between them.
+  if (views.length > 1) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex items-center gap-2.5 border-b border-ink-700 px-6 py-2.5">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-fg-muted">
+            Viewing as
+          </span>
+          <AdminScopeSwitcher
+            options={views.map((v) => ({ id: v.key, label: v.label, meta: v.scopeName ?? undefined }))}
+            value={activeView?.key ?? ''}
+            onChange={setActiveViewKey}
+            menuHeading="Your dashboards in this workspace"
+          />
+        </div>
+        <div className="min-h-0 flex-1">{body}</div>
+      </div>
+    )
+  }
+
+  return <div className="h-full min-h-0">{body}</div>
+}
+
+/** Generic workspace overview shown when a user has no role-specific dashboard here. */
+function GenericWorkspaceOverview({ workspace }: { workspace: Workspace }) {
   return (
     <div className="mx-auto max-w-7xl px-8 py-6">
       <ConnectGoogleBanner />
@@ -172,8 +272,13 @@ function Card({
 /* ---------------- Recent ---------------- */
 
 function RecentCard() {
-  const navigate = useNavigate()
-  const recents = getRecents()
+  const [recents, setRecents] = useState<RecentItem[]>(() => getRecents())
+
+  useEffect(() => {
+    const refresh = () => setRecents(getRecents())
+    window.addEventListener(RECENTS_UPDATED_EVENT, refresh)
+    return () => window.removeEventListener(RECENTS_UPDATED_EVENT, refresh)
+  }, [])
 
   return (
     <Card icon={<History size={14} />} title="Recent">
@@ -182,26 +287,11 @@ function RecentCard() {
           Projects and tasks you open will show up here.
         </p>
       ) : (
-        <div>
+        <ul className="space-y-0.5">
           {recents.slice(0, 7).map((item) => (
-            <button
-              key={`${item.type}-${item.id}`}
-              onClick={() => navigate(item.type === 'task' ? `/app/tasks/${item.id}` : `/app/projects/${item.id}`)}
-              className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-ink-800"
-            >
-              {item.type === 'project' ? (
-                <List size={14} className="shrink-0 text-fg-muted" />
-              ) : (
-                <span className="shrink-0 text-[10px] font-semibold text-fg-muted">{item.sublabel}</span>
-              )}
-              <span className="min-w-0 flex-1 truncate text-sm text-fg">{item.label}</span>
-              {item.type === 'project' && item.sublabel && (
-                <span className="shrink-0 text-xs text-fg-muted">· in {item.sublabel}</span>
-              )}
-              <span className="shrink-0 text-[11px] text-fg-muted">{timeAgo(new Date(item.ts).toISOString())}</span>
-            </button>
+            <RecentListRow key={`${item.type}-${item.id}`} item={item} />
           ))}
-        </div>
+        </ul>
       )}
     </Card>
   )

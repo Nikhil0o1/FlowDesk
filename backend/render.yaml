@@ -1,0 +1,33 @@
+# Render Blueprint — FlowDesk API (Python web service).
+#
+# If the service already exists in the dashboard, set these manually:
+#   Build Command:  bash scripts/render_build.sh
+#   Start Command:  bash scripts/render_start.sh
+#
+# Do NOT run alembic or seed.py in the start command — Render health-checks the
+# port before those finish and the deploy will time out.
+services:
+  - type: web
+    name: flowdesk-api
+    runtime: python
+    buildCommand: bash scripts/render_build.sh
+    startCommand: bash scripts/render_start.sh
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ENVIRONMENT
+        value: production
+      - key: SCHEDULER_ENABLED
+        value: "false"
+      # Set SEED_ON_DEPLOY=true only for a one-time fresh DB seed, then remove.
+      - key: SEED_ON_DEPLOY
+        value: "false"
+      - key: FRONTEND_URL
+        value: https://flowdesk.brightcone.ai
+      - key: BACKEND_URL
+        value: https://flowdesk-api-mvwt.onrender.com
+      - key: MCP_SIDECAR_ENABLED
+        value: "true"
+      - key: TRUSTED_HOSTS
+        value: flowdesk-api-mvwt.onrender.com

@@ -2,22 +2,260 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
+    branches: [main, development]
+  workflow_dispatch:
+
+concurrency:
+  group: ui-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  check-scope:
+    name: Check deployment scope
     runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.scope.outputs.should_deploy }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
-          node-version: 20
+          fetch-depth: 0
+
+      - name: Decide whether full frontend deployment should run
+        id: scope
+        run: |
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+  security-scan:
+    name: Security Scan (npm audit + Snyk + Gitleaks + TruffleHog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [check-scope]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
           cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run npm audit (fail on critical severity CVEs)
+        id: npm_audit
+        run: npm run audit:critical
+        continue-on-error: true
+
+      - name: Verify VAPT-patched dependency versions (issue #7)
+        run: npm run verify:deps
+
+      - name: Verify third-party script hardening (issue #4)
+        run: npm run verify:third-party
+
+      - name: Run Vitest security suite
+        run: npm run test:security
+
+      - name: Check SNYK_TOKEN availability
+        id: snyk_token_check
+        run: |
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "SNYK_TOKEN secret is not configured — Snyk scans will be skipped."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "SNYK_TOKEN is present."
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Install Snyk CLI
+        if: steps.snyk_token_check.outputs.available == 'true'
+        run: npm install -g snyk@1.1304.1
+
+      - name: Run Snyk (dependency vulnerabilities)
+        id: snyk
+        if: steps.snyk_token_check.outputs.available == 'true'
+        run: snyk test --severity-threshold=critical --json > snyk-report.json
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Run Snyk Code (static analysis / SAST)
+        id: snyk_code
+        if: steps.snyk_token_check.outputs.available == 'true'
+        run: snyk code test --severity-threshold=critical --json > snyk-code-report.json
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Snyk scan diagnostics (if a Snyk step failed)
+        if: always() && steps.snyk_token_check.outputs.available == 'true' && (steps.snyk.outcome == 'failure' || steps.snyk_code.outcome == 'failure')
+        run: |
+          echo "=== snyk test (Open Source) — first 6k of snyk-report.json ==="
+          head -c 6144 snyk-report.json 2>/dev/null || echo "(missing or empty)"
+          echo ""
+          echo "=== snyk code — first 6k of snyk-code-report.json ==="
+          head -c 6144 snyk-code-report.json 2>/dev/null || echo "(missing or empty)"
+
+      - name: Scan for hardcoded secrets (trufflehog)
+        id: trufflehog
+        continue-on-error: true
+        uses: trufflesecurity/trufflehog@v3.82.6
+        with:
+          path: ./
+          base: ${{ github.event.before && github.event.before != '0000000000000000000000000000000000000000' && github.event.before || 'HEAD~1' }}
+          head: ${{ github.sha }}
+          extra_args: --only-verified
+
+      - name: Scan for hardcoded secrets (gitleaks)
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          GITLEAKS_VERSION="8.18.4"
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.sha }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            LOG_OPTS="-1 $HEAD"
+          else
+            LOG_OPTS="$BASE..$HEAD"
+          fi
+          ./gitleaks detect \
+            --source=. \
+            --redact \
+            --log-opts="$LOG_OPTS" \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --exit-code 1
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-security-reports
+          path: |
+            snyk-report.json
+            snyk-code-report.json
+            gitleaks-report.json
+
+      - name: Fail if any security scan found issues
+        run: |
+          FAILED=false
+          if [ "${{ steps.npm_audit.outcome }}" = "failure" ]; then
+            echo "npm audit found critical vulnerabilities."
+            FAILED=true
+          fi
+          if [ "${{ steps.snyk_token_check.outputs.available }}" != "true" ]; then
+            echo "Snyk scans were skipped (SNYK_TOKEN not configured)."
+          else
+            if [ "${{ steps.snyk.outcome }}" = "failure" ]; then
+              echo "Snyk found vulnerable dependencies."
+              FAILED=true
+            fi
+            if [ "${{ steps.snyk_code.outcome }}" = "failure" ]; then
+              echo "Snyk Code found source-level security issues."
+              FAILED=true
+            fi
+          fi
+          if [ "${{ steps.gitleaks.outcome }}" = "failure" ]; then
+            echo "Gitleaks found potential secrets."
+            FAILED=true
+          fi
+          if [ "${{ steps.trufflehog.outcome }}" = "failure" ]; then
+            echo "TruffleHog reported verified secrets."
+            FAILED=true
+          fi
+          if [ "$FAILED" = "true" ]; then exit 1; fi
+          echo "All security scans passed."
+
+  run-tests:
+    name: Run Frontend Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [check-scope]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Install dependencies
         run: npm ci
-      - name: Typecheck and build
-        run: npm run build
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run tests
         env:
-          VITE_API_URL: https://flowdesk-api-mvwt.onrender.com
-          VITE_GOOGLE_CLIENT_ID: ci-placeholder
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: npm run test:ci
+
+      - name: Sync coverage summary into tests/
+        run: npm run sync:coverage-summary
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-coverage-report
+          path: |
+            coverage/
+            tests/coverage-summary.json
+            tests/TEST_REPORT.md
+
+  build:
+    name: Production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [check-scope, security-scan, run-tests]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies and build
+        env:
+          VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+          VITE_MICROSOFT_CLIENT_ID: ${{ secrets.VITE_MICROSOFT_CLIENT_ID }}
+        run: |
+          npm ci
+          npm run build
+          if [ ! -d "dist" ] || [ ! -f "dist/index.html" ]; then
+            echo "ERROR: Build failed - dist/ folder not found!"
+            exit 1
+          fi
+          echo "Build successful — dist/ size: $(du -sh dist | cut -f1)"
+
+  ci-success:
+    name: All checks passed
+    runs-on: ubuntu-latest
+    needs: [check-scope, security-scan, run-tests, build]
+    if: needs.check-scope.outputs.should_deploy == 'true'
+    steps:
+      - run: echo "All UI CI checks passed."

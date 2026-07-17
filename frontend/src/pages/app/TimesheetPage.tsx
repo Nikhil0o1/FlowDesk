@@ -9,6 +9,7 @@ import type { Page, Task, TimeEntry } from '../../lib/types'
 import { addDays, cn, formatDate, formatDuration, startOfWeek, toDateKey } from '../../lib/utils'
 import { toast } from '../../stores/toast'
 import { Modal } from '../../components/ui/Modal'
+import { DateInput } from '../../components/ui/DateInput'
 import { CenteredSpinner } from '../../components/ui/Spinner'
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -274,6 +275,7 @@ function CreateEntryModal({ open, onClose, onCreated }: { open: boolean; onClose
   const [taskId, setTaskId] = useState('')
   const [date, setDate] = useState(() => toDateKey(new Date()))
   const [startTime, setStartTime] = useState('09:00')
+  const [days, setDays] = useState('0')
   const [hours, setHours] = useState('1')
   const [minutes, setMinutes] = useState('0')
   const [description, setDescription] = useState('')
@@ -286,11 +288,15 @@ function CreateEntryModal({ open, onClose, onCreated }: { open: boolean; onClose
     enabled: open && !!effectiveProject,
   })
 
+  const durationSeconds =
+    parseInt(days || '0', 10) * 86400 +
+    parseInt(hours || '0', 10) * 3600 +
+    parseInt(minutes || '0', 10) * 60
+
   const create = useMutation({
     mutationFn: () => {
       const started = new Date(`${date}T${startTime}:00`)
-      const durationMs = (parseInt(hours || '0', 10) * 60 + parseInt(minutes || '0', 10)) * 60_000
-      const ended = new Date(started.getTime() + durationMs)
+      const ended = new Date(started.getTime() + durationSeconds * 1000)
       return api.post(`/tasks/${taskId || tasks.data?.items[0]?.id}/time-entries`, {
         started_at: started.toISOString(),
         ended_at: ended.toISOString(),
@@ -307,7 +313,7 @@ function CreateEntryModal({ open, onClose, onCreated }: { open: boolean; onClose
     onError: (err) => toast.error(errorMessage(err)),
   })
 
-  const durationValid = parseInt(hours || '0', 10) * 60 + parseInt(minutes || '0', 10) > 0
+  const durationValid = durationSeconds > 0
   const effectiveTask = taskId || tasks.data?.items[0]?.id
 
   return (
@@ -336,7 +342,7 @@ function CreateEntryModal({ open, onClose, onCreated }: { open: boolean; onClose
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label className="mb-1.5 block text-xs font-medium text-fg-secondary">Date</label>
-            <input type="date" className="input-dark" value={date} onChange={(e) => setDate(e.target.value)} />
+            <DateInput value={date} onChange={setDate} />
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-fg-secondary">Start time</label>
@@ -345,10 +351,12 @@ function CreateEntryModal({ open, onClose, onCreated }: { open: boolean; onClose
         </div>
         <div>
           <label className="mb-1.5 block text-xs font-medium text-fg-secondary">Duration</label>
-          <div className="flex items-center gap-2">
-            <input className="input-dark !w-20" value={hours} onChange={(e) => setHours(e.target.value.replace(/\D/g, ''))} />
+          <div className="flex flex-wrap items-center gap-2">
+            <input className="input-dark !w-16" value={days} onChange={(e) => setDays(e.target.value.replace(/\D/g, ''))} />
+            <span className="text-xs text-fg-muted">d</span>
+            <input className="input-dark !w-16" value={hours} onChange={(e) => setHours(e.target.value.replace(/\D/g, ''))} />
             <span className="text-xs text-fg-muted">h</span>
-            <input className="input-dark !w-20" value={minutes} onChange={(e) => setMinutes(e.target.value.replace(/\D/g, ''))} />
+            <input className="input-dark !w-16" value={minutes} onChange={(e) => setMinutes(e.target.value.replace(/\D/g, ''))} />
             <span className="text-xs text-fg-muted">m</span>
           </div>
         </div>

@@ -3,7 +3,8 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 
 import { useAuthStore } from '../stores/auth'
-import { API_ORIGIN, tryRefresh } from './api'
+import { API_BASE, API_ORIGIN, DEV_BACKEND_ORIGIN } from './env'
+import { tryRefresh } from './api'
 
 export interface RealtimeEvent {
   type: string
@@ -12,6 +13,8 @@ export interface RealtimeEvent {
   project_id?: string
   task_id?: string
   channel_id?: string
+  whiteboard_id?: string
+  document_id?: string
 }
 
 type Handler = (event: RealtimeEvent) => void
@@ -63,14 +66,42 @@ class RealtimeClient {
     const token = useAuthStore.getState().accessToken
     if (!this.shouldRun) return
     if (!token) {
-      // Token not in memory yet (or refresh in flight) — retry shortly
       setTimeout(() => this.connect(), this.reconnectDelay)
       return
     }
-    // Connect to VITE_API_URL when set (Vercel ↔ Render), else same origin (dev proxy)
+    void this._connectWithTicket(token)
+  }
+
+  private async _connectWithTicket(token: string) {
+    if (!this.shouldRun) return
+    let ticket: string
+    try {
+      const res = await fetch(`${API_BASE}/ws/ticket`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.status === 401) {
+        const result = await tryRefresh()
+        if (result === 'denied') {
+          useAuthStore.getState().clear()
+          return
+        }
+        if (this.shouldRun) setTimeout(() => this.connect(), this.reconnectDelay)
+        return
+      }
+      if (!res.ok) throw new Error('ticket fetch failed')
+      const data = await res.json()
+      ticket = data.ticket
+    } catch {
+      if (this.shouldRun) setTimeout(() => this.connect(), this.reconnectDelay)
+      return
+    }
+    // Production split deploy → API_ORIGIN; dev → direct backend (skip Vite ws proxy).
     const httpBase =
-      API_ORIGIN || `${window.location.protocol === 'https:' ? 'https' : 'http'}://${window.location.host}`
-    const ws = new WebSocket(`${httpBase.replace(/^http/, 'ws')}/api/v1/ws?token=${token}`)
+      API_ORIGIN ||
+      DEV_BACKEND_ORIGIN ||
+      `${window.location.protocol === 'https:' ? 'https' : 'http'}://${window.location.host}`
+    const ws = new WebSocket(`${httpBase.replace(/^http/, 'ws')}/api/v1/ws?ticket=${ticket}`)
     this.ws = ws
 
     ws.onopen = () => {

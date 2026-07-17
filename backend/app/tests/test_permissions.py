@@ -5,9 +5,10 @@ from sqlalchemy import select
 from app.models.organization import OrganizationMember
 from app.models.notification import Notification
 from app.models.project import Project, ProjectMember, Space
-from app.models.task import Task
+from app.models.task import CustomStatus, Task, TaskAssignee
 from app.models.workspace import Workspace, WorkspaceMember
-from app.tests.conftest import auth_headers, make_user
+from app.core.task_ref import format_task_ref
+from app.tests.conftest import auth_headers, make_user, seed_login_otp
 
 
 def _build_workspace(db, org, owner):
@@ -19,7 +20,7 @@ def _build_workspace(db, org, owner):
     db.add(space)
     db.flush()
     project = Project(
-        space_id=space.id, workspace_id=workspace.id, name="Proj", key="PRJ", created_by=owner.id
+        space_id=space.id, workspace_id=workspace.id, name="Proj", created_by=owner.id
     )
     db.add(project)
     db.flush()
@@ -52,10 +53,13 @@ def test_superadmin_can_disable_org(client, db, org, owner, superadmin):
     response = client.post(f"/api/v1/admin/organizations/{org.id}/disable", headers=headers)
     assert response.status_code == 200
 
-    # Disabled org blocks members
-    owner_headers = auth_headers(client, "owner@test.dev")
-    blocked = client.get(f"/api/v1/organizations/{org.id}", headers=owner_headers)
-    assert blocked.status_code == 403
+    # Disabled org blocks member sign-in
+    seed_login_otp(db, "owner@test.dev", "424242")
+    blocked_login = client.post(
+        "/api/v1/auth/otp/verify", json={"email": "owner@test.dev", "code": "424242"}
+    )
+    assert blocked_login.status_code == 403
+    assert "disabled" in blocked_login.json()["detail"].lower()
 
 
 def test_non_superadmin_cannot_access_admin_api(client, owner):
@@ -65,11 +69,14 @@ def test_non_superadmin_cannot_access_admin_api(client, owner):
 
 def test_outsider_cannot_see_workspace(client, db, org, owner):
     workspace, project, _task = _build_workspace(db, org, owner)
-    outsider = make_user(db, "outsider@test.dev")
-    headers = auth_headers(client, "outsider@test.dev")
+    make_user(db, "outsider@test.dev")
 
-    assert client.get(f"/api/v1/workspaces/{workspace.id}", headers=headers).status_code == 404
-    assert client.get(f"/api/v1/projects/{project.id}/tasks", headers=headers).status_code == 404
+    seed_login_otp(db, "outsider@test.dev", "424242")
+    blocked_login = client.post(
+        "/api/v1/auth/otp/verify", json={"email": "outsider@test.dev", "code": "424242"}
+    )
+    assert blocked_login.status_code == 403
+    assert "permission" in blocked_login.json()["detail"].lower()
 
 
 def test_member_sees_only_assigned_projects(client, db, org, owner):
@@ -91,6 +98,71 @@ def test_member_sees_only_assigned_projects(client, db, org, owner):
     db.add(ProjectMember(project_id=project.id, user_id=member.id, role="member"))
     db.flush()
     assert client.get(f"/api/v1/projects/{project.id}", headers=headers).status_code == 200
+
+
+def test_project_member_can_only_change_assigned_task_status(client, db, org, owner):
+    workspace, project, task = _build_workspace(db, org, owner)
+    todo = CustomStatus(project_id=project.id, name="To do", category="todo", position=0)
+    progress = CustomStatus(project_id=project.id, name="In progress", category="in_progress", position=1)
+    db.add(todo)
+    db.add(progress)
+    assignee = make_user(db, "assigned-status@test.dev")
+    other_member = make_user(db, "other-status@test.dev")
+    for user in (assignee, other_member):
+        db.add(OrganizationMember(organization_id=org.id, user_id=user.id, role="member"))
+        db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="member"))
+        db.add(ProjectMember(project_id=project.id, user_id=user.id, role="member"))
+    db.flush()
+    task.status_id = todo.id
+    db.add(TaskAssignee(task_id=task.id, user_id=assignee.id, assigned_by=owner.id))
+    db.flush()
+
+    other_headers = auth_headers(client, "other-status@test.dev")
+    blocked = client.patch(
+        f"/api/v1/tasks/{task.id}",
+        headers=other_headers,
+        json={"status_id": str(progress.id)},
+    )
+    assert blocked.status_code == 403
+
+    assignee_headers = auth_headers(client, "assigned-status@test.dev")
+    moved = client.patch(
+        f"/api/v1/tasks/{task.id}",
+        headers=assignee_headers,
+        json={"status_id": str(progress.id)},
+    )
+    assert moved.status_code == 200, moved.text
+
+
+def test_project_member_cannot_manage_task_assignees(client, db, org, owner):
+    workspace, project, task = _build_workspace(db, org, owner)
+    member = make_user(db, "assignee-member@test.dev")
+    target = make_user(db, "assignee-target@test.dev")
+    for user in (member, target):
+        db.add(OrganizationMember(organization_id=org.id, user_id=user.id, role="member"))
+        db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="member"))
+        db.add(ProjectMember(project_id=project.id, user_id=user.id, role="member"))
+    db.add(TaskAssignee(task_id=task.id, user_id=member.id, assigned_by=owner.id))
+    db.flush()
+    headers = auth_headers(client, "assignee-member@test.dev")
+
+    add_response = client.post(
+        f"/api/v1/tasks/{task.id}/assignees",
+        headers=headers,
+        json={"user_ids": [str(target.id)]},
+    )
+    assert add_response.status_code == 403
+
+    remove_response = client.delete(f"/api/v1/tasks/{task.id}/assignees/{member.id}", headers=headers)
+    assert remove_response.status_code == 403
+
+    owner_headers = auth_headers(client, "owner@test.dev")
+    admin_response = client.post(
+        f"/api/v1/tasks/{task.id}/assignees",
+        headers=owner_headers,
+        json={"user_ids": [str(target.id)]},
+    )
+    assert admin_response.status_code == 200, admin_response.text
 
 
 def test_workspace_member_cannot_delete_workspace(client, db, org, owner):
@@ -169,7 +241,25 @@ def test_workspace_owner_cannot_change_owner_roles(client, db, org, owner):
     assert response.status_code == 403
 
 
-def test_workspace_admin_can_promote_and_demote_admins_and_members(client, db, org, owner):
+def test_org_admin_can_demote_workspace_admin(client, db, org, owner):
+    workspace, _project, _task = _build_workspace(db, org, owner)
+    org_admin = make_user(db, "org-admin-demote@test.dev")
+    ws_admin = make_user(db, "ws-admin-demote@test.dev")
+    db.add(OrganizationMember(organization_id=org.id, user_id=org_admin.id, role="admin"))
+    db.add(OrganizationMember(organization_id=org.id, user_id=ws_admin.id, role="member"))
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=ws_admin.id, role="admin"))
+    db.flush()
+    headers = auth_headers(client, org_admin.email)
+
+    response = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{ws_admin.id}",
+        headers=headers,
+        json={"role": "member"},
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_workspace_admin_can_demote_members_but_not_promote_or_modify_other_admins(client, db, org, owner):
     workspace, _project, _task = _build_workspace(db, org, owner)
     admin = make_user(db, "role-admin@test.dev")
     other_admin = make_user(db, "other-admin@test.dev")
@@ -187,14 +277,21 @@ def test_workspace_admin_can_promote_and_demote_admins_and_members(client, db, o
         headers=headers,
         json={"role": "admin"},
     )
-    assert promoted.status_code == 200, promoted.text
+    assert promoted.status_code == 403
 
     demoted = client.patch(
         f"/api/v1/workspaces/{workspace.id}/members/{other_admin.id}",
         headers=headers,
         json={"role": "member"},
     )
-    assert demoted.status_code == 200, demoted.text
+    assert demoted.status_code == 403, demoted.text
+
+    member_demoted = client.patch(
+        f"/api/v1/workspaces/{workspace.id}/members/{member.id}",
+        headers=headers,
+        json={"role": "member"},
+    )
+    assert member_demoted.status_code == 200, member_demoted.text
 
 
 def test_workspace_member_cannot_change_roles(client, db, org, owner):
@@ -241,7 +338,7 @@ def test_workspace_owner_can_remove_admins_and_members_but_not_owners(client, db
     )
 
 
-def test_workspace_admin_can_remove_members_only(client, db, org, owner):
+def test_workspace_admin_can_remove_members_but_not_other_admins_or_owners_or_self(client, db, org, owner):
     workspace, _project, _task = _build_workspace(db, org, owner)
     admin = make_user(db, "remove-role-admin@test.dev")
     other_admin = make_user(db, "remove-other-admin@test.dev")
@@ -255,8 +352,10 @@ def test_workspace_admin_can_remove_members_only(client, db, org, owner):
     headers = auth_headers(client, "remove-role-admin@test.dev")
 
     assert client.delete(f"/api/v1/workspaces/{workspace.id}/members/{member.id}", headers=headers).status_code == 200
-    blocked_admin = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{other_admin.id}", headers=headers)
-    assert blocked_admin.status_code == 403
+    removed_admin = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{other_admin.id}", headers=headers)
+    assert removed_admin.status_code == 403, removed_admin.text
+    blocked_self = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{admin.id}", headers=headers)
+    assert blocked_self.status_code == 403
     blocked_owner = client.delete(f"/api/v1/workspaces/{workspace.id}/members/{owner.id}", headers=headers)
     assert blocked_owner.status_code == 403
 
@@ -286,7 +385,7 @@ def test_task_crud_with_permissions(client, db, org, owner):
     )
     assert created.status_code == 201
     body = created.json()
-    assert body["ref"].startswith("PRJ-")
+    assert body["ref"] == format_task_ref(project.id, body["number"])
     assert body["priority"] == "high"
 
     updated = client.patch(

@@ -3,8 +3,11 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.core.email_validation import InviteEmail
 from app.schemas.common import ORMModel
+from app.schemas.organization import InviteOut
 from app.schemas.user import UserBrief
+from app.schemas.workspace import ScopedInviteGrant
 
 
 class SpaceCreate(BaseModel):
@@ -28,11 +31,25 @@ class SpaceOut(ORMModel):
     icon: str | None = None
     position: int
     created_at: datetime
+    my_role: str | None = None  # "admin" | "member" | null (workspace/org admin bypass)
+
+
+class SpaceMemberOut(ORMModel):
+    id: uuid.UUID
+    space_id: uuid.UUID
+    user_id: uuid.UUID
+    role: str
+    created_at: datetime
+    user: UserBrief | None = None
+
+
+class SpaceInviteRequest(BaseModel):
+    email: InviteEmail
+    role: str = Field(default="member", pattern="^(admin|member)$")
 
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    key: str = Field(min_length=2, max_length=10, pattern="^[A-Za-z][A-Za-z0-9]*$")
     description: str | None = Field(default=None, max_length=4000)
     color: str = Field(default="#9B59B6", max_length=20)
     icon: str | None = Field(default=None, max_length=40)
@@ -48,17 +65,19 @@ class ProjectUpdate(BaseModel):
 
 class ProjectOut(ORMModel):
     id: uuid.UUID
-    space_id: uuid.UUID
+    space_id: uuid.UUID | None = None
     workspace_id: uuid.UUID
     name: str
-    key: str
     description: str | None = None
     color: str
     icon: str | None = None
     position: int
     is_archived: bool
+    is_personal: bool = False
+    personal_owner_id: uuid.UUID | None = None
     created_at: datetime
     my_role: str | None = None
+    my_explicit_role: str | None = None
     task_count: int | None = None
     done_task_count: int | None = None
 
@@ -76,8 +95,54 @@ class ProjectMemberAdd(BaseModel):
     role: str = Field(default="member", pattern="^(admin|member|viewer)$")
 
 
+class ProjectMemberCandidateOut(BaseModel):
+    user_id: uuid.UUID
+    user: UserBrief | None = None
+    in_workspace: bool = False
+
+
+class ScopedBulkInviteCreate(BaseModel):
+    email: InviteEmail
+    grants: list[ScopedInviteGrant] = Field(min_length=1, max_length=30)
+
+
+class ScopedBulkInviteOut(BaseModel):
+    invites: list[InviteOut]
+    skipped: list[str] = Field(default_factory=list)
+
+
+class ProjectMemberRoleUpdate(BaseModel):
+    role: str = Field(pattern="^(admin|member|viewer)$")
+
+
+class ProjectTeamAssign(BaseModel):
+    team_id: uuid.UUID
+    role: str = Field(default="member", pattern="^(admin|member|viewer)$")
+
+
+class ProjectTeamOut(ORMModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    team_id: uuid.UUID
+    team_name: str
+    team_color: str
+    default_role: str
+    member_count: int
+    assigned_by: uuid.UUID | None = None
+    created_at: datetime
+
+
+class ProjectTeamAssignResult(BaseModel):
+    team_id: uuid.UUID
+    team_name: str
+    members_added: int
+    members_skipped: int
+    members_ineligible: int
+    assignment: ProjectTeamOut
+
+
 class ProjectInviteCreate(BaseModel):
-    email: str
+    email: InviteEmail
     role: str = Field(default="member", pattern="^(admin|member|viewer)$")
 
 
